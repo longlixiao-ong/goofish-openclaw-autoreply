@@ -1,0 +1,297 @@
+{
+  "name": "goofish-inbound.example",
+  "active": false,
+  "settings": {},
+  "nodes": [
+    {
+      "id": "Webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1320,
+        280
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "goofish-inbound",
+        "responseMode": "lastNode"
+      }
+    },
+    {
+      "id": "Dedup",
+      "name": "去重",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1100,
+        280
+      ],
+      "parameters": {
+        "jsCode": "// TODO: 使用 data/autoreply-state.json 或外部存储做幂等去重（cid + send_user_id + send_message + timestamp）\nreturn items;"
+      }
+    },
+    {
+      "id": "SwitchCheck",
+      "name": "自动客服开关检查",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        280
+      ],
+      "parameters": {
+        "jsCode": "// TODO: 读取 data/autoreply-state.json\n// 若 enabled=false 则抛错或打标后结束\nreturn items;"
+      }
+    },
+    {
+      "id": "CooldownCheck",
+      "name": "会话冷却",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -660,
+        280
+      ],
+      "parameters": {
+        "jsCode": "// TODO: 按 cid 做 cooldown_seconds 检查\nreturn items;"
+      }
+    },
+    {
+      "id": "ClassifyRisk",
+      "name": "风险分类",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -440,
+        280
+      ],
+      "parameters": {
+        "jsCode": "// 可直接复用 n8n/snippets/classifyRisk.js\nconst text = String($json.send_message || '');\nconst high = ['退款','投诉','售后','举报','假货','骗子','微信','QQ','支付宝','银行卡','线下','转账','私聊','加我'];\nconst low = ['还在吗','在吗','包邮吗','今天能发吗','能便宜吗','最低多少','小刀'];\nlet risk = 'medium';\nlet reason = 'default_medium';\nconst highHit = high.find((k) => text.includes(k));\nif (highHit) { risk = 'high'; reason = `hit_high_keyword:${highHit}`; }\nelse {\n  const lowHit = low.find((k) => text.includes(k));\n  if (lowHit) { risk = 'low'; reason = `hit_low_keyword:${lowHit}`; }\n}\nreturn [{ json: { ...$json, risk, risk_reason: reason } }];"
+      }
+    },
+    {
+      "id": "RiskRoute",
+      "name": "IF 高风险",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        280
+      ],
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.risk}}",
+              "operation": "equal",
+              "value2": "high"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "HighRiskStop",
+      "name": "高风险转人工",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        20,
+        160
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: { ...$json, send: false, handoff: true, reason: 'high_risk' } }];"
+      }
+    },
+    {
+      "id": "LowRiskReply",
+      "name": "低风险规则回复",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        20,
+        360
+      ],
+      "parameters": {
+        "jsCode": "// 可直接复用 n8n/snippets/lowRiskReplies.js\nconst text = String($json.send_message || '').trim();\nlet rule_reply = '';\nif (/还在吗|在吗/.test(text)) rule_reply = '在的，喜欢可拍';\nelse if (/包邮吗/.test(text)) rule_reply = '默认不包，合适可以小刀';\nelse if (/今天能发吗/.test(text)) rule_reply = '今天拍下可以尽快发';\nelse if (/能便宜吗|小刀/.test(text)) rule_reply = '可以小刀，你出个合适价';\nelse if (/最低多少/.test(text)) rule_reply = '价格比较实，合适可拍';\nreturn [{ json: { ...$json, rule_reply } }];"
+      }
+    },
+    {
+      "id": "OpenClawRequest",
+      "name": "OpenClaw HTTP 请求",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        260,
+        360
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.OPENCLAW_REPLY_URL || 'http://openclaw:18789/reply'}}",
+        "sendBody": true,
+        "contentType": "json",
+        "jsonBody": "={\"cid\": $json.cid, \"toid\": $json.send_user_id, \"message\": $json.send_message, \"risk\": $json.risk, \"rule_reply\": $json.rule_reply}"
+      }
+    },
+    {
+      "id": "SanitizeReply",
+      "name": "sanitizeReply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        360
+      ],
+      "parameters": {
+        "jsCode": "// 可直接复用 n8n/snippets/sanitizeReply.js\nconst maxReplyChars = Number($json.max_reply_chars || 80);\nconst blocked = /(微信|QQ|支付宝|银行卡|线下|转账|私聊|加我)/i;\nlet text = String($json.reply || $json.rule_reply || '').replace(/<think>[\\s\\S]*?<\\/think>/gi, ' ');\ntext = text.replace(/```(?:thinking|reasoning|analysis)[\\s\\S]*?```/gi, ' ');\nconst markers = ['最终回复：','最终回复:','买家可见回复：','买家可见回复:','回复：','回复:'];\nfor (const marker of markers) {\n  const idx = text.lastIndexOf(marker);\n  if (idx >= 0) text = text.slice(idx + marker.length);\n}\ntext = text.split(/\\r?\\n/)\n  .map((line) => line.replace(/^\\s*(?:[-*+]|#{1,6}|>|\\d+[.)])\\s*/, '').trim())\n  .filter((line) => line && !/^(思考|分析|推理|判断|策略|步骤|理由|reasoning|analysis)/i.test(line))\n  .join(' ')\n  .replace(/\\s+/g, ' ')\n  .trim();\nif (blocked.test(text)) text = '平台内沟通就行，合适可拍';\ntext = text.slice(0, maxReplyChars);\nreturn [{ json: { ...$json, sanitized_reply: text } }];"
+      }
+    },
+    {
+      "id": "ExternalScan",
+      "name": "外联词扫描",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        740,
+        360
+      ],
+      "parameters": {
+        "jsCode": "let final_reply = String($json.sanitized_reply || '').trim();\nif (/(微信|QQ|支付宝|银行卡|线下|转账|私聊|加我)/i.test(final_reply)) {\n  final_reply = '平台内沟通就行，合适可拍';\n}\nreturn [{ json: { ...$json, final_reply } }];"
+      }
+    },
+    {
+      "id": "SendText",
+      "name": "send_text.py",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        980,
+        360
+      ],
+      "parameters": {
+        "command": "python /workspace/scripts/send_text.py --cid \"={{$json.cid}}\" --toid \"={{$json.send_user_id}}\" --text \"={{$json.final_reply}}\""
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "去重",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "去重": {
+      "main": [
+        [
+          {
+            "node": "自动客服开关检查",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "自动客服开关检查": {
+      "main": [
+        [
+          {
+            "node": "会话冷却",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "会话冷却": {
+      "main": [
+        [
+          {
+            "node": "风险分类",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "风险分类": {
+      "main": [
+        [
+          {
+            "node": "IF 高风险",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF 高风险": {
+      "main": [
+        [
+          {
+            "node": "高风险转人工",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "低风险规则回复",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "低风险规则回复": {
+      "main": [
+        [
+          {
+            "node": "OpenClaw HTTP 请求",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenClaw HTTP 请求": {
+      "main": [
+        [
+          {
+            "node": "sanitizeReply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "sanitizeReply": {
+      "main": [
+        [
+          {
+            "node": "外联词扫描",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "外联词扫描": {
+      "main": [
+        [
+          {
+            "node": "send_text.py",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}

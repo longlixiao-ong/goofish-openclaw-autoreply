@@ -991,3 +991,74 @@ goofish-cli = 闲鱼操作层
 n8n = 自动化流程控制层
 OpenClaw = 唯一 AI 大脑
 ```
+
+---
+
+## 19. Day1 正式可跑版（feat/mvp-autoreply）
+
+### 19.1 Windows Codex App 开发流程
+
+1. 在 Codex App 打开仓库 `C:\Users\lucky\Projects\goofish-openclaw-autoreply`。
+2. 确认分支是 `feat/mvp-autoreply`，仅在该分支开发和验证。
+3. 在本地先完成静态校验与编译检查，不做真实闲鱼发信压测。
+4. 把 n8n workflow 与 snippets 作为示例模板导入，再按本机环境补齐路径。
+
+### 19.2 PowerShell 常用命令（MVP）
+
+```powershell
+# 1) 确认分支
+git branch --show-current
+
+# 2) 编译检查（必须）
+python -m py_compile goofish-watcher/watcher.py scripts/send_text.py
+
+# 3) 启动示例服务（复制 example 文件后再运行）
+docker compose -f docker-compose.yml up -d n8n goofish-watcher
+
+# 4) 查看 watcher 日志
+docker compose logs -f goofish-watcher
+```
+
+### 19.3 MVP 运行步骤（文本自动客服闭环）
+
+1. 准备 `.env`（从 `.env.example` 复制），仅本地使用，不提交。
+2. 准备 `data/autoreply-state.json`（可从 `data/autoreply-state.example.json` 复制）。
+3. 启动 `n8n` 与 `goofish-watcher`。
+4. 在 n8n 导入 `n8n/workflows/goofish-inbound.example.json`。
+5. 按节点补齐本机 `OPENCLAW_REPLY_URL` 与 `send_text.py` 执行路径。
+6. 保持 `safe_mode` 与限流参数，先用低风险问句做流程验证。
+
+### 19.4 n8n Webhook 配置
+
+- `goofish-watcher` 环境变量：`N8N_WEBHOOK_URL=http://n8n:5678/webhook/goofish-inbound`
+- n8n Webhook 节点：`POST /webhook/goofish-inbound`
+- 入站只处理 `event=message`，其余事件直接忽略。
+
+### 19.5 OpenClaw 返回 JSON 格式（要求）
+
+```json
+{
+  "send": true,
+  "reply": "在的，喜欢可拍",
+  "risk": "low",
+  "handoff": false
+}
+```
+
+### 19.6 测试清单（Day1）
+
+- [ ] `python -m py_compile goofish-watcher/watcher.py scripts/send_text.py` 通过。
+- [ ] watcher 只转发 `event=message`。
+- [ ] n8n 收到 Webhook 后可完成：去重→开关→冷却→风险分类→回复清洗→外联扫描。
+- [ ] `scripts/send_text.py` 失败时返回非 0，输出 JSON。
+- [ ] 日志中不出现 Cookie / API Key。
+
+### 19.7 安全提交提醒
+
+不要提交以下内容到 Git：
+
+- `.env`
+- Cookie 文件或 `goofish-state/`
+- API Key / Token
+- `logs/`
+- `n8n_data/`

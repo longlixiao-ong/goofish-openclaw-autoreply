@@ -2,6 +2,8 @@ services:
   n8n:
     image: n8nio/n8n:latest
     restart: always
+    env_file:
+      - .env
     ports:
       - "5678:5678"
     environment:
@@ -11,6 +13,11 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - ./n8n_data:/home/node/.n8n
+      - ./n8n:/workspace/n8n
+      - ./scripts:/workspace/scripts:ro
+      - ./data:/workspace/data
+      - ./goofish-state:/workspace/goofish-state:ro
+      - ./logs:/workspace/logs
 
   goofish-watcher:
     build:

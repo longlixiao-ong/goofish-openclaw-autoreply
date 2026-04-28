@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "mode": "auto",
+  "safe_mode": true,
+  "auto_send": true,
+  "cooldown_seconds": 15,
+  "global_send_interval_seconds": 30,
+  "max_reply_chars": 80
+}
