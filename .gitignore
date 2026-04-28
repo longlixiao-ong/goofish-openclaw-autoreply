@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Runtime state / secrets
+goofish-state/
+n8n_data/
+openclaw-data/
+data/
+logs/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# n8n exports / local backups
+*.backup.json
+*.local.json
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
