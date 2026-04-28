@@ -14,6 +14,9 @@ goofish-state/
 n8n_data/
 openclaw-data/
 data/
+!data/
+data/*
+!data/autoreply-state.example.json
 logs/
 *.log
 *.sqlite
