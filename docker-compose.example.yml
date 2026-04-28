@@ -1,0 +1,39 @@
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+
+  goofish-watcher:
+    build:
+      context: ./goofish-watcher
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./goofish-state:/root/.goofish-cli
+      - ./logs:/app/logs
+    depends_on:
+      - n8n
+
+  # Optional later: replace shell-based message sending with a long-running HTTP bridge.
+  # goofish-bridge:
+  #   build:
+  #     context: ./goofish-bridge
+  #   restart: always
+  #   env_file:
+  #     - .env
+  #   ports:
+  #     - "8787:8787"
+  #   volumes:
+  #     - ./goofish-state:/root/.goofish-cli
+  #     - ./data:/app/data
+  #     - ./logs:/app/logs
