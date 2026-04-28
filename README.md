@@ -1062,3 +1062,88 @@ docker compose logs -f goofish-watcher
 - API Key / Token
 - `logs/`
 - `n8n_data/`
+
+---
+
+## 20. 正式路线：goofish-bridge（HTTP 服务）
+
+从这一版开始，n8n 发送阶段不再执行本地命令，不再调用 `scripts/send_text.py`。
+
+正式链路改为：
+
+```text
+goofish message watch
+  -> goofish-watcher
+  -> n8n
+  -> OpenClaw
+  -> n8n sanitize/risk
+  -> HTTP POST goofish-bridge /send
+  -> goofish message send
+```
+
+关键边界：
+
+- n8n 只通过 HTTP 调 `goofish-bridge`。
+- `goofish-state` 只挂载在 `goofish-watcher` 和 `goofish-bridge`，n8n 不持有 Cookie。
+- `goofish-bridge` 内部仍调用官方 `goofish-cli`，保留其限流与熔断，不做绕过。
+- `scripts/send_text.py` 保留为本地调试备用脚本，不在正式 n8n 发送链路中使用。
+
+### 20.1 Docker Compose 启动步骤
+
+```powershell
+# 1) 复制示例配置
+Copy-Item .env.example .env
+
+# 2) 启动正式链路服务
+docker compose -f docker-compose.yml up -d n8n goofish-watcher goofish-bridge
+
+# 3) 查看 bridge 日志
+docker compose logs -f goofish-bridge
+```
+
+### 20.2 goofish-bridge 接口示例
+
+```bash
+# health
+curl http://localhost:8787/health
+
+# status
+curl http://localhost:8787/status
+
+# send
+curl -X POST http://localhost:8787/send \
+  -H "Content-Type: application/json" \
+  -d '{"cid":"60585751957","toid":"2215266653893","text":"在的，喜欢可拍"}'
+
+# 开启自动客服
+curl -X POST http://localhost:8787/autoreply/start
+
+# 关闭自动客服
+curl -X POST http://localhost:8787/autoreply/stop
+
+# 自动客服状态
+curl http://localhost:8787/autoreply/status
+```
+
+### 20.3 n8n workflow 约束
+
+- 入站消息 workflow：`n8n/workflows/goofish-inbound.example.json`
+- 发送节点必须是 `HTTP Request -> http://goofish-bridge:8787/send`
+- 开关节点必须调用：
+  - `POST http://goofish-bridge:8787/autoreply/start`
+  - `POST http://goofish-bridge:8787/autoreply/stop`
+  - `GET  http://goofish-bridge:8787/autoreply/status`
+
+### 20.4 正式路线测试步骤
+
+```powershell
+python -m py_compile goofish-watcher/watcher.py scripts/send_text.py goofish-bridge/app.py
+python -m json.tool data/autoreply-state.example.json
+python -m json.tool n8n/workflows/goofish-inbound.example.json
+```
+
+说明：
+
+- 测试只做编译和 JSON 结构校验。
+- 不运行真实 `goofish message send` 测试。
+- 不运行真实闲鱼发送测试。
