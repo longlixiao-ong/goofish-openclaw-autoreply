@@ -3,6 +3,8 @@
 This smoke test validates local `goofish-bridge` endpoint availability only.
 
 It **does not** call `/send` and **does not** perform real Goofish/Xianyu message sending.
+It will restore the original `autoreply` enabled state before exit.
+If initial state cannot be identified, it restores to `stop/off` for safety.
 
 ## Steps
 

@@ -105,16 +105,9 @@ def read_enabled_field(payload: Any) -> bool | None:
 
 def main() -> int:
     args = parse_args()
-    steps = [
-        ("health", "GET", "/health"),
-        ("status_before", "GET", "/autoreply/status"),
-        ("stop", "POST", "/autoreply/stop"),
-        ("start", "POST", "/autoreply/start"),
-        ("status_after", "GET", "/autoreply/status"),
-    ]
-
     results: list[dict[str, Any]] = []
-    for step_name, method, path in steps:
+
+    def run_step(step_name: str, method: str, path: str) -> dict[str, Any]:
         result = http_call(
             base_url=args.base_url,
             path=path,
@@ -123,40 +116,72 @@ def main() -> int:
         )
         result["step"] = step_name
         results.append(result)
+        return result
 
-    enabled_values = {
-        "status_before": read_enabled_field(results[1].get("response")),
-        "stop": read_enabled_field(results[2].get("response")),
-        "start": read_enabled_field(results[3].get("response")),
-        "status_after": read_enabled_field(results[4].get("response")),
-    }
+    health = run_step("health", "GET", "/health")
+    status_before = run_step("status_before", "GET", "/autoreply/status")
+    initial_enabled = read_enabled_field(status_before.get("response"))
+
+    stop_result = run_step("stop", "POST", "/autoreply/stop")
+    start_result = run_step("start", "POST", "/autoreply/start")
+    status_after_start = run_step("status_after_start", "GET", "/autoreply/status")
+
+    if initial_enabled is True:
+        final_restore_action = "start"
+        restore_path = "/autoreply/start"
+        expected_restored_enabled = True
+    elif initial_enabled is False:
+        final_restore_action = "stop"
+        restore_path = "/autoreply/stop"
+        expected_restored_enabled = False
+    else:
+        final_restore_action = "stop"
+        restore_path = "/autoreply/stop"
+        expected_restored_enabled = False
+
+    run_step("restore", "POST", restore_path)
+    status_restored = run_step("status_restored", "GET", "/autoreply/status")
+    restored_enabled = read_enabled_field(status_restored.get("response"))
 
     checks = [
         {
             "name": "stop_should_disable",
             "expected": False,
-            "actual": enabled_values["stop"],
-            "ok": enabled_values["stop"] is False,
+            "actual": read_enabled_field(stop_result.get("response")),
+            "ok": read_enabled_field(stop_result.get("response")) is False,
         },
         {
             "name": "start_should_enable",
             "expected": True,
-            "actual": enabled_values["start"],
-            "ok": enabled_values["start"] is True,
+            "actual": read_enabled_field(start_result.get("response")),
+            "ok": read_enabled_field(start_result.get("response")) is True,
         },
         {
-            "name": "final_status_should_enable",
+            "name": "status_after_start_should_enable",
             "expected": True,
-            "actual": enabled_values["status_after"],
-            "ok": enabled_values["status_after"] is True,
+            "actual": read_enabled_field(status_after_start.get("response")),
+            "ok": read_enabled_field(status_after_start.get("response")) is True,
+        },
+        {
+            "name": "restored_status_should_match_initial_or_safe_default",
+            "expected": expected_restored_enabled,
+            "actual": restored_enabled,
+            "ok": restored_enabled is expected_restored_enabled,
         },
     ]
 
     report = {
-        "ok": all(item["ok"] for item in results) and all(check["ok"] for check in checks),
+        "ok": (
+            all(item["ok"] for item in results)
+            and all(check["ok"] for check in checks)
+            and health.get("ok", False)
+        ),
         "base_url": args.base_url,
         "timeout": args.timeout,
         "send_called": False,
+        "initial_enabled": initial_enabled,
+        "final_restore_action": final_restore_action,
+        "restored_enabled": restored_enabled,
         "steps": results,
         "checks": checks,
     }
