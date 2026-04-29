@@ -302,7 +302,7 @@
     },
     {
       "id": "OpenClawRequest",
-      "name": "OpenClaw HTTP 请求",
+      "name": "OpenClaw Custom Reply 请求",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
       "position": [
@@ -314,7 +314,7 @@
         "url": "={{$env.OPENCLAW_REPLY_URL || 'http://openclaw:18789/reply'}}",
         "sendBody": true,
         "contentType": "json",
-        "jsonBody": "={\"cid\": $json.cid, \"toid\": $json.send_user_id, \"message\": $json.send_message, \"risk\": $json.risk, \"risk_reason\": $json.risk_reason, \"route_reason\": $json.route_reason, \"handoff\": $json.handoff, \"handoff_reason\": $json.handoff_reason, \"dry_run\": $json.dry_run, \"item_context\": $json.item_context, \"item_context_status\": $json.item_context_status, \"item_context_reason\": $json.item_context_reason, \"customer_service_policy\": { \"mode\": \"handoff_gate\", \"default_action\": \"allow_openclaw_autoreply\", \"handoff_only\": true, \"handoff_triggers\": [\"refund_or_after_sale\",\"complaint_or_report\",\"counterfeit_or_legal_risk\",\"abuse_or_threat\",\"off_platform_or_external_contact\",\"address_or_order_or_payment_or_shipping_dispute\",\"promise_requires_manual_confirmation\"], \"send_guardrails\": { \"must_block_when\": [\"handoff_true\",\"should_send_false\",\"empty_reply\",\"system_exception\"], \"send_via_bridge_only\": true } } }"
+        "jsonBody": "={\"runtime_mode\": \"custom_reply\", \"cid\": $json.cid, \"toid\": $json.send_user_id, \"message\": $json.send_message, \"risk\": $json.risk, \"risk_reason\": $json.risk_reason, \"route_reason\": $json.route_reason, \"handoff\": $json.handoff, \"handoff_reason\": $json.handoff_reason, \"dry_run\": $json.dry_run, \"item_context\": $json.item_context, \"item_context_status\": $json.item_context_status, \"item_context_reason\": $json.item_context_reason, \"customer_service_policy\": { \"mode\": \"handoff_gate\", \"default_action\": \"allow_openclaw_autoreply\", \"handoff_only\": true, \"handoff_triggers\": [\"refund_or_after_sale\",\"complaint_or_report\",\"counterfeit_or_legal_risk\",\"abuse_or_threat\",\"off_platform_or_external_contact\",\"address_or_order_or_payment_or_shipping_dispute\",\"promise_requires_manual_confirmation\"], \"send_guardrails\": {\"must_block_when\": [\"handoff_true\",\"should_send_false\",\"empty_reply\",\"system_exception\"], \"send_via_bridge_only\": true } } }"
       },
       "continueOnFail": true
     },
@@ -328,7 +328,7 @@
         360
       ],
       "parameters": {
-        "jsCode": "const contextItems = $(\"保留 OpenClaw 请求上下文\").all();\n\nconst pickText = (value) => {\n  if (typeof value === 'string' && value.trim()) return value.trim();\n  return '';\n};\n\nconst parseBool = (value) => {\n  if (typeof value === 'boolean') return value;\n  if (typeof value === 'number') return value !== 0;\n  if (typeof value === 'string') {\n    const lower = value.trim().toLowerCase();\n    if (['true', '1', 'yes', 'y'].includes(lower)) return true;\n    if (['false', '0', 'no', 'n'].includes(lower)) return false;\n  }\n  return null;\n};\n\nconst parseObject = (value) => {\n  if (!value) return null;\n  if (typeof value === 'object') return value;\n  if (typeof value === 'string') {\n    const text = value.trim();\n    if (!text) return null;\n    try {\n      const parsed = JSON.parse(text);\n      if (parsed && typeof parsed === 'object') return parsed;\n    } catch {\n      return null;\n    }\n  }\n  return null;\n};\n\nconst collectObjects = (response) => {\n  const objects = [];\n  const pushIfObject = (value) => {\n    const parsed = parseObject(value);\n    if (parsed) objects.push(parsed);\n  };\n\n  pushIfObject(response);\n  pushIfObject(response?.data);\n  pushIfObject(response?.result);\n  pushIfObject(response?.output);\n  pushIfObject(response?.response);\n  pushIfObject(response?.payload);\n  pushIfObject(response?.data?.result);\n  pushIfObject(response?.data?.output);\n  pushIfObject(response?.output?.result);\n\n  return objects;\n};\n\nreturn items.map((item, index) => {\n  const rawResponse = item.json || {};\n  const response = parseObject(rawResponse) || rawResponse;\n  const contextWrapper = (contextItems[index] && contextItems[index].json) || {};\n  const context = contextWrapper.openclaw_context || contextWrapper || {};\n\n  const objects = collectObjects(response);\n\n  const replyCandidates = [];\n  for (const obj of objects) {\n    replyCandidates.push(['reply', obj.reply]);\n    replyCandidates.push(['text', obj.text]);\n    replyCandidates.push(['message', obj.message]);\n    replyCandidates.push(['content', obj.content]);\n    replyCandidates.push(['final_reply', obj.final_reply]);\n    replyCandidates.push(['answer', obj.answer]);\n    replyCandidates.push(['choices[0].message.content', obj.choices?.[0]?.message?.content]);\n    replyCandidates.push(['choices[0].text', obj.choices?.[0]?.text]);\n  }\n\n  let openclawReply = '';\n  let source = 'none';\n  for (const [name, value] of replyCandidates) {\n    const text = pickText(value);\n    if (text) {\n      openclawReply = text;\n      source = name;\n      break;\n    }\n  }\n\n  const boolCandidates = [];\n  for (const obj of objects) {\n    boolCandidates.push(['handoff', obj.handoff]);\n    boolCandidates.push(['need_handoff', obj.need_handoff]);\n    boolCandidates.push(['needs_handoff', obj.needs_handoff]);\n    boolCandidates.push(['needs_human', obj.needs_human]);\n    boolCandidates.push(['human_handoff', obj.human_handoff]);\n  }\n\n  let handoff = null;\n  for (const [, value] of boolCandidates) {\n    const parsed = parseBool(value);\n    if (parsed !== null) {\n      handoff = parsed;\n      break;\n    }\n  }\n  if (handoff === null) handoff = false;\n\n  const sendCandidates = [];\n  for (const obj of objects) {\n    sendCandidates.push(['should_send', obj.should_send]);\n    sendCandidates.push(['shouldSend', obj.shouldSend]);\n    sendCandidates.push(['send', obj.send]);\n  }\n\n  let shouldSend = null;\n  for (const [, value] of sendCandidates) {\n    const parsed = parseBool(value);\n    if (parsed !== null) {\n      shouldSend = parsed;\n      break;\n    }\n  }\n  if (shouldSend === null) {\n    shouldSend = handoff ? false : true;\n  }\n\n  const reasonCandidates = [];\n  for (const obj of objects) {\n    reasonCandidates.push(obj.reason);\n    reasonCandidates.push(obj.handoff_reason);\n    reasonCandidates.push(obj.route_reason);\n    reasonCandidates.push(obj.block_reason);\n  }\n\n  let openclawReason = '';\n  for (const value of reasonCandidates) {\n    const text = pickText(value);\n    if (text) {\n      openclawReason = text;\n      break;\n    }\n  }\n\n  const errorCandidates = [];\n  for (const obj of objects) {\n    errorCandidates.push(obj.error?.message);\n    errorCandidates.push(obj.error);\n    errorCandidates.push(obj.err);\n    errorCandidates.push(obj.exception);\n  }\n\n  let openclawError = '';\n  for (const value of errorCandidates) {\n    const text = pickText(value);\n    if (text) {\n      openclawError = text;\n      break;\n    }\n  }\n\n  return {\n    json: {\n      ...context,\n      cid: context.cid,\n      send_user_id: context.send_user_id,\n      send_message: context.send_message,\n      risk: context.risk,\n      risk_reason: context.risk_reason,\n      route_reason: context.route_reason,\n      handoff,\n      handoff_reason: handoff ? (openclawReason || String(context.handoff_reason || 'openclaw_handoff')) : String(context.handoff_reason || ''),\n      should_send: shouldSend,\n      reply: openclawReply,\n      openclaw_reply: openclawReply,\n      openclaw_response: response,\n      openclaw_reply_source: source,\n      openclaw_reason: openclawReason,\n      openclaw_error: openclawError,\n      item_context_status: context.item_context_status,\n      item_context_reason: context.item_context_reason,\n      cooldown_seconds: context.cooldown_seconds,\n      max_reply_chars: context.max_reply_chars,\n    },\n  };\n});"
+        "jsCode": "const contextItems = $(\"保留 OpenClaw 请求上下文\").all();\n\nconst pickText = (value) => {\n  if (typeof value === 'string' && value.trim()) return value.trim();\n  return '';\n};\n\nconst parseBool = (value) => {\n  if (typeof value === 'boolean') return value;\n  if (typeof value === 'number') return value !== 0;\n  if (typeof value === 'string') {\n    const lower = value.trim().toLowerCase();\n    if (['true', '1', 'yes', 'y'].includes(lower)) return true;\n    if (['false', '0', 'no', 'n'].includes(lower)) return false;\n  }\n  return null;\n};\n\nconst parseObject = (value) => {\n  if (!value) return null;\n  if (typeof value === 'object') return value;\n  if (typeof value === 'string') {\n    const text = value.trim();\n    if (!text) return null;\n    try {\n      const parsed = JSON.parse(text);\n      if (parsed && typeof parsed === 'object') return parsed;\n    } catch {\n      return null;\n    }\n  }\n  return null;\n};\n\nconst collectObjects = (response) => {\n  const objects = [];\n  const pushIfObject = (value) => {\n    const parsed = parseObject(value);\n    if (parsed) objects.push(parsed);\n  };\n\n  pushIfObject(response);\n  pushIfObject(response?.data);\n  pushIfObject(response?.result);\n  pushIfObject(response?.output);\n  pushIfObject(response?.response);\n  pushIfObject(response?.payload);\n  pushIfObject(response?.data?.result);\n  pushIfObject(response?.data?.output);\n  pushIfObject(response?.output?.result);\n\n  return objects;\n};\n\nreturn items.map((item, index) => {\n  const rawResponse = item.json || {};\n  const response = parseObject(rawResponse) || rawResponse;\n  const contextWrapper = (contextItems[index] && contextItems[index].json) || {};\n  const context = contextWrapper.openclaw_context || contextWrapper || {};\n\n  const runtimeMode = String(($env.OPENCLAW_RUNTIME_MODE || 'custom_reply')).trim().toLowerCase() || 'custom_reply';\n  const objects = collectObjects(response);\n\n  const replyCandidates = [];\n  for (const obj of objects) {\n    replyCandidates.push(['reply', obj.reply]);\n    replyCandidates.push(['text', obj.text]);\n    replyCandidates.push(['message', obj.message]);\n    replyCandidates.push(['content', obj.content]);\n    replyCandidates.push(['final_reply', obj.final_reply]);\n    replyCandidates.push(['answer', obj.answer]);\n    replyCandidates.push(['choices[0].message.content', obj.choices?.[0]?.message?.content]);\n    replyCandidates.push(['choices[0].text', obj.choices?.[0]?.text]);\n  }\n\n  let openclawReply = '';\n  let source = 'none';\n  for (const [name, value] of replyCandidates) {\n    const text = pickText(value);\n    if (text) {\n      openclawReply = text;\n      source = name;\n      break;\n    }\n  }\n\n  // If chat completions content itself is JSON, parse it to recover reply/should_send/handoff/reason.\n  let contentObject = null;\n  if (source === 'choices[0].message.content') {\n    contentObject = parseObject(openclawReply);\n  }\n  if (contentObject) {\n    objects.unshift(contentObject);\n    if (pickText(contentObject.reply)) {\n      openclawReply = pickText(contentObject.reply);\n      source = 'choices[0].message.content.reply';\n    }\n  }\n\n  const boolCandidates = [];\n  for (const obj of objects) {\n    boolCandidates.push(['handoff', obj.handoff]);\n    boolCandidates.push(['need_handoff', obj.need_handoff]);\n    boolCandidates.push(['needs_handoff', obj.needs_handoff]);\n    boolCandidates.push(['needs_human', obj.needs_human]);\n    boolCandidates.push(['human_handoff', obj.human_handoff]);\n  }\n\n  let handoff = null;\n  for (const [, value] of boolCandidates) {\n    const parsed = parseBool(value);\n    if (parsed !== null) {\n      handoff = parsed;\n      break;\n    }\n  }\n  if (handoff === null) handoff = false;\n\n  const sendCandidates = [];\n  for (const obj of objects) {\n    sendCandidates.push(['should_send', obj.should_send]);\n    sendCandidates.push(['shouldSend', obj.shouldSend]);\n    sendCandidates.push(['send', obj.send]);\n  }\n\n  let shouldSend = null;\n  for (const [, value] of sendCandidates) {\n    const parsed = parseBool(value);\n    if (parsed !== null) {\n      shouldSend = parsed;\n      break;\n    }\n  }\n  if (shouldSend === null) {\n    shouldSend = handoff ? false : true;\n  }\n\n  const reasonCandidates = [];\n  for (const obj of objects) {\n    reasonCandidates.push(obj.reason);\n    reasonCandidates.push(obj.handoff_reason);\n    reasonCandidates.push(obj.route_reason);\n    reasonCandidates.push(obj.block_reason);\n  }\n\n  let openclawReason = '';\n  for (const value of reasonCandidates) {\n    const text = pickText(value);\n    if (text) {\n      openclawReason = text;\n      break;\n    }\n  }\n\n  const errorCandidates = [];\n  for (const obj of objects) {\n    errorCandidates.push(obj.error?.message);\n    errorCandidates.push(obj.error);\n    errorCandidates.push(obj.err);\n    errorCandidates.push(obj.exception);\n    errorCandidates.push(obj.message && String(obj.message).includes('status code') ? obj.message : '');\n  }\n  errorCandidates.push(response?.error?.message);\n  errorCandidates.push(response?.error);\n\n  let openclawError = '';\n  for (const value of errorCandidates) {\n    const text = pickText(value);\n    if (text) {\n      openclawError = text;\n      break;\n    }\n  }\n\n  // HTML or non-JSON content from upstream is treated as runtime error for fail-closed.\n  if (!openclawError && runtimeMode === 'openai_chat' && source === 'choices[0].message.content') {\n    const maybeHtml = openclawReply.trim().toLowerCase();\n    if (maybeHtml.startsWith('<!doctype html') || maybeHtml.startsWith('<html')) {\n      openclawError = 'openclaw_html_response';\n    }\n  }\n\n  return {\n    json: {\n      ...context,\n      cid: context.cid,\n      send_user_id: context.send_user_id,\n      send_message: context.send_message,\n      risk: context.risk,\n      risk_reason: context.risk_reason,\n      route_reason: context.route_reason,\n      openclaw_runtime_mode: runtimeMode,\n      handoff,\n      handoff_reason: handoff ? (openclawReason || String(context.handoff_reason || 'openclaw_handoff')) : String(context.handoff_reason || ''),\n      should_send: shouldSend,\n      reply: openclawReply,\n      openclaw_reply: openclawReply,\n      openclaw_response: response,\n      openclaw_reply_source: source,\n      openclaw_reason: openclawReason,\n      openclaw_error: openclawError,\n      item_context_status: context.item_context_status,\n      item_context_reason: context.item_context_reason,\n      cooldown_seconds: context.cooldown_seconds,\n      max_reply_chars: context.max_reply_chars,\n    },\n  };\n});"
       }
     },
     {
@@ -454,6 +454,58 @@
       "parameters": {
         "jsCode": "return [{\n  json: {\n    ok: true,\n    send: false,\n    reason: String($json.reason || $json.route_reason || 'blocked'),\n    cid: $json.cid ?? '',\n    send_user_id: $json.send_user_id ?? '',\n    send_message: $json.send_message ?? '',\n    handoff: [true, 'true', 1, '1'].includes($json.handoff),\n    handoff_reason: $json.handoff_reason || '',\n    route_reason: $json.route_reason || '',\n    item_context_status: $json.item_context_status || '',\n    item_context_reason: $json.item_context_reason || '',\n    openclaw_response: $json.openclaw_response ?? null,\n    should_send: [true, 'true', 1, '1'].includes($json.should_send),\n    final_reply: $json.final_reply || '',\n  },\n}];"
       }
+    },
+    {
+      "id": "OpenClawRuntimeModeIf",
+      "name": "IF OpenClaw Runtime Mode",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ (($env.OPENCLAW_RUNTIME_MODE || \"custom_reply\").toLowerCase() === \"openai_chat\") }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "OpenClawChatCompletionsRequest",
+      "name": "OpenClaw Chat Completions 请求",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        420,
+        260
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.OPENCLAW_CHAT_COMPLETIONS_URL || \"http://host.docker.internal:18789/v1/chat/completions\"}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ \"Bearer \" + ($env.OPENCLAW_GATEWAY_TOKEN || \"\") }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "jsonBody": "={{ { \"model\": ($env.OPENCLAW_MODEL || \"openclaw/default\"), \"messages\": [ {\"role\": \"system\", \"content\": \"你是闲鱼客服助手。必须只输出JSON对象，且只包含 reply、should_send、handoff、reason 四个核心字段。禁止输出思考过程、Markdown、<think>标签。若需要人工介入或存在风险，返回 should_send=false 且 handoff=true。\"}, {\"role\": \"user\", \"content\": (\"cid=\" + String($json.cid || \"\") + \"\\n\" + \"send_user_id=\" + String($json.send_user_id || \"\") + \"\\n\" + \"risk=\" + String($json.risk || \"\") + \"\\n\" + \"risk_reason=\" + String($json.risk_reason || \"\") + \"\\n\" + \"route_reason=\" + String($json.route_reason || \"\") + \"\\n\" + \"buyer_message=\" + String($json.send_message || \"\") + \"\\n\" + \"item_context_status=\" + String($json.item_context_status || \"\") + \"\\n\" + \"item_context_reason=\" + String($json.item_context_reason || \"\") + \"\\n\" + \"customer_service_policy=\" + JSON.stringify({ mode: \"handoff_gate\", default_action: \"allow_openclaw_autoreply\", handoff_only: true, send_guardrails: { must_block_when: [\"handoff_true\",\"should_send_false\",\"empty_reply\",\"system_exception\"], send_via_bridge_only: true } }) + \"\\n\" + \"item_context=\" + JSON.stringify($json.item_context || null))} ], \"user\": String($json.cid || $json.send_user_id || \"\") } }}"
+      },
+      "continueOnFail": true
     }
   ],
   "connections": {
@@ -654,18 +706,7 @@
       "main": [
         [
           {
-            "node": "OpenClaw HTTP 请求",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "OpenClaw HTTP 请求": {
-      "main": [
-        [
-          {
-            "node": "归一化 OpenClaw 回复",
+            "node": "IF OpenClaw Runtime Mode",
             "type": "main",
             "index": 0
           }
@@ -746,6 +787,46 @@
         [
           {
             "node": "不发送结束",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF OpenClaw Runtime Mode": {
+      "main": [
+        [
+          {
+            "node": "OpenClaw Chat Completions 请求",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "OpenClaw Custom Reply 请求",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenClaw Custom Reply 请求": {
+      "main": [
+        [
+          {
+            "node": "归一化 OpenClaw 回复",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenClaw Chat Completions 请求": {
+      "main": [
+        [
+          {
+            "node": "归一化 OpenClaw 回复",
             "type": "main",
             "index": 0
           }

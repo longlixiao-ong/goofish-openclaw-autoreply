@@ -1,7 +1,8 @@
-"""Probe OpenClaw /reply contract with item_context payload.
+"""Probe OpenClaw runtime contracts without sending Goofish messages.
 
-This script only calls OPENCLAW_REPLY_URL and never calls /send.
-It does not trigger real Goofish message sending.
+Supports:
+- custom_reply mode (/reply custom JSON contract)
+- openai_chat mode (/v1/chat/completions with Bearer token)
 """
 
 from __future__ import annotations
@@ -16,16 +17,21 @@ from typing import Any
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Test OpenClaw /reply contract without sending Goofish messages")
+    parser = argparse.ArgumentParser(description="Test OpenClaw runtime contract without calling /send")
     parser.add_argument(
-        "--url",
-        default=os.environ.get("OPENCLAW_REPLY_URL", "").strip(),
-        help="OpenClaw /reply URL (default: env OPENCLAW_REPLY_URL)",
+        "--mode",
+        choices=["custom_reply", "openai_chat"],
+        default=(os.environ.get("OPENCLAW_RUNTIME_MODE", "custom_reply").strip() or "custom_reply"),
+        help="Runtime mode (default: env OPENCLAW_RUNTIME_MODE or custom_reply)",
     )
+    parser.add_argument("--url", default="", help="Override runtime URL")
+    parser.add_argument("--token", default=os.environ.get("OPENCLAW_GATEWAY_TOKEN", "").strip(), help="Gateway token")
+    parser.add_argument("--model", default=os.environ.get("OPENCLAW_MODEL", "openclaw/default").strip() or "openclaw/default")
     parser.add_argument("--cid", default="test-cid", help="Conversation id")
     parser.add_argument("--toid", default="test-toid", help="Buyer id")
     parser.add_argument("--message", default="还在吗", help="Buyer message for test")
     parser.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout seconds")
+    parser.add_argument("--self-check", action="store_true", help="Run offline checks only, no HTTP calls")
     return parser.parse_args()
 
 
@@ -105,7 +111,7 @@ def collect_objects(response: Any) -> list[dict[str, Any]]:
     return objects
 
 
-def normalize_openclaw_response(raw: Any) -> dict[str, Any]:
+def normalize_openclaw_response(raw: Any, mode: str) -> dict[str, Any]:
     response = parse_object(raw) or {"raw": raw}
     objects = collect_objects(response)
 
@@ -130,6 +136,14 @@ def normalize_openclaw_response(raw: Any) -> dict[str, Any]:
                 break
         if reply:
             break
+
+    # Parse chat content JSON when model returns JSON string in content.
+    content_object = parse_object(reply) if reply_source == "choices[0].message.content" else None
+    if content_object is not None:
+        objects.insert(0, content_object)
+        if pick_text(content_object.get("reply")):
+            reply = pick_text(content_object.get("reply"))
+            reply_source = "choices[0].message.content.reply"
 
     handoff: bool | None = None
     should_send: bool | None = None
@@ -165,9 +179,14 @@ def normalize_openclaw_response(raw: Any) -> dict[str, Any]:
                     break
 
         if not error:
-            for value in [((obj.get("error") or {}).get("message") if isinstance(obj.get("error"), dict) else obj.get("error")), obj.get("err"), obj.get("exception")]:
+            for value in [
+                ((obj.get("error") or {}).get("message") if isinstance(obj.get("error"), dict) else obj.get("error")),
+                obj.get("err"),
+                obj.get("exception"),
+                obj.get("message"),
+            ]:
                 text = pick_text(value)
-                if text:
+                if text and ("status code" in text.lower() or "unauthorized" in text.lower() or "forbidden" in text.lower() or value == obj.get("err") or value == obj.get("exception") or isinstance(obj.get("error"), (str, dict))):
                     error = text
                     break
 
@@ -175,6 +194,10 @@ def normalize_openclaw_response(raw: Any) -> dict[str, Any]:
         handoff = False
     if should_send is None:
         should_send = not handoff
+
+    maybe_html = reply.strip().lower()
+    if mode == "openai_chat" and not error and (maybe_html.startswith("<!doctype html") or maybe_html.startswith("<html")):
+        error = "openclaw_html_response"
 
     return {
         "reply": reply,
@@ -187,7 +210,7 @@ def normalize_openclaw_response(raw: Any) -> dict[str, Any]:
     }
 
 
-def build_test_payload(args: argparse.Namespace) -> dict[str, Any]:
+def build_common_context(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "cid": args.cid,
         "toid": args.toid,
@@ -227,28 +250,87 @@ def build_test_payload(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def http_post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        url=url,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
+def build_custom_reply_request(args: argparse.Namespace) -> dict[str, Any]:
+    context = build_common_context(args)
+    return {
+        "url": args.url.strip() or os.environ.get("OPENCLAW_REPLY_URL", "").strip(),
+        "headers": {"Content-Type": "application/json", "Accept": "application/json"},
+        "payload": {
+            "runtime_mode": "custom_reply",
+            "cid": context["cid"],
+            "toid": context["toid"],
+            "message": context["message"],
+            "risk": context["risk"],
+            "risk_reason": context["risk_reason"],
+            "route_reason": context["route_reason"],
+            "handoff": context["handoff"],
+            "handoff_reason": context["handoff_reason"],
+            "dry_run": context["dry_run"],
+            "item_context": context["item_context"],
+            "item_context_status": context["item_context_status"],
+            "item_context_reason": context["item_context_reason"],
+            "customer_service_policy": context["customer_service_policy"],
         },
-        data=data,
+    }
+
+
+def build_openai_chat_request(args: argparse.Namespace) -> dict[str, Any]:
+    context = build_common_context(args)
+    url = args.url.strip() or os.environ.get(
+        "OPENCLAW_CHAT_COMPLETIONS_URL",
+        "http://host.docker.internal:18789/v1/chat/completions",
+    ).strip()
+    token = args.token.strip()
+    system_text = (
+        "你是闲鱼客服助手。必须只输出JSON对象，字段至少包含 reply、should_send、handoff、reason。"
+        "禁止输出思考过程、Markdown和<think>。若需要人工介入，设置 handoff=true 且 should_send=false。"
     )
+    user_text = "\n".join(
+        [
+            f"cid={context['cid']}",
+            f"send_user_id={context['toid']}",
+            f"risk={context['risk']}",
+            f"risk_reason={context['risk_reason']}",
+            f"route_reason={context['route_reason']}",
+            f"buyer_message={context['message']}",
+            f"item_context_status={context['item_context_status']}",
+            f"item_context_reason={context['item_context_reason']}",
+            f"customer_service_policy={json.dumps(context['customer_service_policy'], ensure_ascii=False)}",
+            f"item_context={json.dumps(context['item_context'], ensure_ascii=False)}",
+        ]
+    )
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+    return {
+        "url": url,
+        "headers": headers,
+        "payload": {
+            "model": args.model,
+            "messages": [
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_text},
+            ],
+            "user": context["cid"] or context["toid"],
+        },
+    }
+
+
+def http_post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(url=url, method="POST", headers=headers, data=data)
     started = time.perf_counter()
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw_body = response.read().decode("utf-8", errors="replace")
             elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
-            parsed = parse_json_or_text(raw_body)
             return {
                 "ok": True,
                 "http_status": int(response.status),
                 "elapsed_ms": elapsed_ms,
-                "body": parsed,
+                "body": parse_json_or_text(raw_body),
             }
     except urllib.error.HTTPError as exc:
         raw_body = ""
@@ -273,55 +355,161 @@ def http_post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[st
         }
 
 
-def validate_contract(normalized: dict[str, Any]) -> tuple[bool, list[str]]:
-    issues: list[str] = []
-    if parse_bool(normalized.get("should_send")) is None:
-        issues.append("missing/invalid should_send")
-    if parse_bool(normalized.get("handoff")) is None:
-        issues.append("missing/invalid handoff")
-
+def evaluate_fail_closed(response_ok: bool, normalized: dict[str, Any]) -> dict[str, Any]:
     reply_text = pick_text(normalized.get("reply"))
-    should_send = parse_bool(normalized.get("should_send"))
-    if should_send is True and not reply_text:
-        issues.append("should_send=true but reply is empty")
+    handoff = parse_bool(normalized.get("handoff")) is True
+    should_send_value = parse_bool(normalized.get("should_send"))
+    should_send = True if should_send_value is None else should_send_value
+    error_text = pick_text(normalized.get("error"))
 
-    return (len(issues) == 0, issues)
+    if not response_ok:
+        return {"send": False, "reason": "http_error"}
+    if error_text:
+        return {"send": False, "reason": "runtime_error"}
+    if handoff:
+        return {"send": False, "reason": "handoff_true"}
+    if should_send is False:
+        return {"send": False, "reason": "should_send_false"}
+    if not reply_text:
+        return {"send": False, "reason": "empty_reply"}
+    return {"send": True, "reason": "ready"}
+
+
+def run_self_check() -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+
+    ns_custom = argparse.Namespace(
+        mode="custom_reply",
+        url="http://openclaw:18789/reply",
+        token="",
+        model="openclaw/default",
+        cid="c",
+        toid="u",
+        message="还在吗",
+        timeout=5.0,
+        self_check=True,
+    )
+    custom_req = build_custom_reply_request(ns_custom)
+    checks.append(
+        {
+            "name": "custom_reply_request_shape",
+            "ok": (
+                isinstance(custom_req["payload"], dict)
+                and custom_req["payload"].get("runtime_mode") == "custom_reply"
+                and "item_context" in custom_req["payload"]
+                and "customer_service_policy" in custom_req["payload"]
+            ),
+        }
+    )
+
+    ns_chat = argparse.Namespace(
+        mode="openai_chat",
+        url="http://host.docker.internal:18789/v1/chat/completions",
+        token="abc",
+        model="openclaw/default",
+        cid="c",
+        toid="u",
+        message="还在吗",
+        timeout=5.0,
+        self_check=True,
+    )
+    chat_req = build_openai_chat_request(ns_chat)
+    checks.append(
+        {
+            "name": "openai_chat_request_shape",
+            "ok": (
+                chat_req["payload"].get("model") == "openclaw/default"
+                and isinstance(chat_req["payload"].get("messages"), list)
+                and len(chat_req["payload"]["messages"]) == 2
+                and chat_req["headers"].get("Authorization") == "Bearer abc"
+            ),
+        }
+    )
+
+    choices_response = {
+        "choices": [
+            {
+                "message": {
+                    "content": "{\"reply\":\"在的，喜欢可拍\",\"should_send\":true,\"handoff\":false,\"reason\":\"normal\"}"
+                }
+            }
+        ]
+    }
+    normalized_choices = normalize_openclaw_response(choices_response, mode="openai_chat")
+    checks.append(
+        {
+            "name": "choices_content_parse",
+            "ok": (
+                normalized_choices.get("reply") == "在的，喜欢可拍"
+                and normalized_choices.get("should_send") is True
+                and normalized_choices.get("handoff") is False
+            ),
+        }
+    )
+
+    unauthorized_normalized = normalize_openclaw_response({"error": {"message": "401 Unauthorized"}}, mode="openai_chat")
+    unauthorized_decision = evaluate_fail_closed(False, unauthorized_normalized)
+    checks.append({"name": "unauthorized_fail_closed", "ok": unauthorized_decision["send"] is False})
+
+    html_normalized = normalize_openclaw_response({"choices": [{"message": {"content": "<html>forbidden</html>"}}]}, mode="openai_chat")
+    html_decision = evaluate_fail_closed(True, html_normalized)
+    checks.append({"name": "html_fail_closed", "ok": html_decision["send"] is False})
+
+    error_normalized = normalize_openclaw_response({"error": {"message": "internal server error"}}, mode="custom_reply")
+    error_decision = evaluate_fail_closed(True, error_normalized)
+    checks.append({"name": "error_fail_closed", "ok": error_decision["send"] is False})
+
+    return {"ok": all(c["ok"] for c in checks), "checks": checks}
 
 
 def main() -> int:
     args = parse_args()
-    url = (args.url or "").strip()
+
+    if args.self_check:
+        report = run_self_check()
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report["ok"] else 1
+
+    if args.mode == "openai_chat":
+        request_config = build_openai_chat_request(args)
+    else:
+        request_config = build_custom_reply_request(args)
+
+    url = pick_text(request_config.get("url"))
     if not url:
+        missing = "OPENCLAW_CHAT_COMPLETIONS_URL" if args.mode == "openai_chat" else "OPENCLAW_REPLY_URL"
         print(
             json.dumps(
-                {
-                    "ok": False,
-                    "error": "missing OpenClaw URL; set OPENCLAW_REPLY_URL or pass --url",
-                },
+                {"ok": False, "error": f"missing OpenClaw URL; set {missing} or pass --url"},
                 ensure_ascii=False,
                 indent=2,
             )
         )
         return 2
 
-    payload = build_test_payload(args)
-    response = http_post_json(url=url, payload=payload, timeout=args.timeout)
-    normalized = normalize_openclaw_response(response.get("body"))
-    compatible, issues = validate_contract(normalized)
+    response = http_post_json(
+        url=url,
+        headers=request_config["headers"],
+        payload=request_config["payload"],
+        timeout=args.timeout,
+    )
+    normalized = normalize_openclaw_response(response.get("body"), mode=args.mode)
+    fail_closed_decision = evaluate_fail_closed(bool(response.get("ok")), normalized)
 
     report = {
-        "ok": bool(response.get("ok")) and compatible,
+        "ok": bool(response.get("ok")) and fail_closed_decision["send"],
+        "mode": args.mode,
         "url": url,
         "timeout": args.timeout,
         "send_called": False,
-        "request_payload": payload,
+        "request_headers": request_config["headers"],
+        "request_payload": request_config["payload"],
         "response_ok": response.get("ok", False),
         "http_status": response.get("http_status"),
         "elapsed_ms": response.get("elapsed_ms"),
         "response_body": response.get("body"),
         "normalized": normalized,
-        "compatible": compatible,
-        "issues": issues,
+        "fail_closed_decision": fail_closed_decision,
     }
     if not response.get("ok"):
         report["transport_error"] = response.get("error", "")

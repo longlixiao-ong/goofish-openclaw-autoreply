@@ -1144,9 +1144,12 @@ curl http://localhost:8787/autoreply/status
   - 无有效 `reply` 不发送
   - 任意系统异常不发送
 - 发送节点必须是 `HTTP Request -> http://goofish-bridge:8787/send`，不得绕过 bridge 闸门
-- OpenClaw 地址通过 `.env` 中 `OPENCLAW_REPLY_URL` 配置：
-  - 默认 mock：`http://openclaw:18789/reply`
-  - 真实 OpenClaw：`http://<real-host>:<port>/reply` 或 `https://<domain>/reply`
+- OpenClaw runtime 模式通过 `.env` 配置：
+  - `OPENCLAW_RUNTIME_MODE=custom_reply`：请求 `OPENCLAW_REPLY_URL`
+  - `OPENCLAW_RUNTIME_MODE=openai_chat`：请求 `OPENCLAW_CHAT_COMPLETIONS_URL`
+  - `openai_chat` 模式需配置：
+    - `OPENCLAW_GATEWAY_TOKEN`（Authorization Bearer）
+    - `OPENCLAW_MODEL`（默认 `openclaw/default`）
 - `/send` 作为最终安全闸门（bridge fail-closed）：
   - `safe_mode=true` 时会在 bridge 侧再次拦截外联词和异常文本
   - `safe_mode=true` 时会执行 `global_send_interval_seconds` 全局发送间隔
@@ -1184,17 +1187,21 @@ python -m json.tool n8n/workflows/goofish-inbound.example.json
 - `final_reply`
 - `send=false`
 
-### 20.6 OpenClaw 运行时切换（mock -> real）
+### 20.6 OpenClaw 运行时切换（custom_reply / openai_chat）
 
-默认开发模式（mock）：
+默认开发模式（mock，`custom_reply`）：
 
 ```powershell
 docker compose up -d n8n goofish-bridge openclaw
 ```
 
-真实 OpenClaw 模式：
+官方 OpenClaw Gateway 模式（`openai_chat`）：
 
-1. 修改 `.env` 的 `OPENCLAW_REPLY_URL` 为真实 `/reply` 地址
+1. 修改 `.env`：
+   - `OPENCLAW_RUNTIME_MODE=openai_chat`
+   - `OPENCLAW_CHAT_COMPLETIONS_URL=http://host.docker.internal:18789/v1/chat/completions`
+   - `OPENCLAW_GATEWAY_TOKEN=<真实 token，不提交>`
+   - `OPENCLAW_MODEL=openclaw/default`
 2. 启动时不启动本地 mock `openclaw` 服务
 
 ```powershell
@@ -1203,8 +1210,9 @@ docker compose up -d n8n goofish-bridge
 
 回滚到 mock：
 
-1. `OPENCLAW_REPLY_URL` 改回 `http://openclaw:18789/reply`
-2. 重新启动 `openclaw` mock 服务
+1. `OPENCLAW_RUNTIME_MODE=custom_reply`
+2. `OPENCLAW_REPLY_URL` 改回 `http://openclaw:18789/reply`
+3. 重新启动 `openclaw` mock 服务
 
 ```powershell
 docker compose up -d n8n goofish-bridge openclaw
@@ -1216,18 +1224,21 @@ docker compose up -d n8n goofish-bridge openclaw
 
 用途：
 
-- 向 `OPENCLAW_REPLY_URL` 发送带 `item_context` 的测试请求
+- 支持 `custom_reply` 与 `openai_chat` 两种请求格式
 - 输出原始响应 + 归一化结果
 - 不调用 `/send`，不发送闲鱼消息
 
 示例：
 
 ```powershell
-# mock 模式（compose 映射 127.0.0.1:18789）
-python scripts/test_openclaw_reply.py --url http://127.0.0.1:18789/reply
+# custom_reply（mock）
+python scripts/test_openclaw_reply.py --mode custom_reply --url http://127.0.0.1:18789/reply
 
-# 真实 OpenClaw 模式
-python scripts/test_openclaw_reply.py --url "<YOUR_REAL_OPENCLAW_REPLY_URL>"
+# openai_chat（官方 gateway）
+python scripts/test_openclaw_reply.py --mode openai_chat --url http://host.docker.internal:18789/v1/chat/completions --token "<TOKEN>" --model openclaw/default
+
+# 离线校验（不发 HTTP）
+python scripts/test_openclaw_reply.py --self-check
 ```
 
 详见：
