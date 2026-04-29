@@ -38,6 +38,15 @@ Steps:
 10. Send gate (fail closed): block send on `handoff=true`, `should_send=false`, empty reply, or any system exception.
 11. Non-dry-run send path must go through `POST /send` only.
 
+OpenClaw response compatibility notes:
+
+- Preferred fields: `reply`, `should_send`, `handoff`, `reason`
+- Also normalized from common variants such as:
+  - `send` / `shouldSend`
+  - nested `data.*`, `result.*`, `output.*`
+  - `final_reply`, `answer`, `choices[0].message.content`
+- HTTP failure and transport errors are treated as `system_exception` and will not be sent.
+
 Dry-run output (always `send=false`) includes:
 
 - `handoff`

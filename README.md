@@ -1144,6 +1144,9 @@ curl http://localhost:8787/autoreply/status
   - 无有效 `reply` 不发送
   - 任意系统异常不发送
 - 发送节点必须是 `HTTP Request -> http://goofish-bridge:8787/send`，不得绕过 bridge 闸门
+- OpenClaw 地址通过 `.env` 中 `OPENCLAW_REPLY_URL` 配置：
+  - 默认 mock：`http://openclaw:18789/reply`
+  - 真实 OpenClaw：`http://<real-host>:<port>/reply` 或 `https://<domain>/reply`
 - 开关节点必须调用：
   - `POST http://goofish-bridge:8787/autoreply/start`
   - `POST http://goofish-bridge:8787/autoreply/stop`
@@ -1177,12 +1180,63 @@ python -m json.tool n8n/workflows/goofish-inbound.example.json
 - `final_reply`
 - `send=false`
 
+### 20.6 OpenClaw 运行时切换（mock -> real）
+
+默认开发模式（mock）：
+
+```powershell
+docker compose up -d n8n goofish-bridge openclaw
+```
+
+真实 OpenClaw 模式：
+
+1. 修改 `.env` 的 `OPENCLAW_REPLY_URL` 为真实 `/reply` 地址
+2. 启动时不启动本地 mock `openclaw` 服务
+
+```powershell
+docker compose up -d n8n goofish-bridge
+```
+
+回滚到 mock：
+
+1. `OPENCLAW_REPLY_URL` 改回 `http://openclaw:18789/reply`
+2. 重新启动 `openclaw` mock 服务
+
+```powershell
+docker compose up -d n8n goofish-bridge openclaw
+```
+
+### 20.7 OpenClaw 协议测试脚本（仅测试，不发送）
+
+新增脚本：`scripts/test_openclaw_reply.py`
+
+用途：
+
+- 向 `OPENCLAW_REPLY_URL` 发送带 `item_context` 的测试请求
+- 输出原始响应 + 归一化结果
+- 不调用 `/send`，不发送闲鱼消息
+
+示例：
+
+```powershell
+# mock 模式（compose 映射 127.0.0.1:18789）
+python scripts/test_openclaw_reply.py --url http://127.0.0.1:18789/reply
+
+# 真实 OpenClaw 模式
+python scripts/test_openclaw_reply.py --url "<YOUR_REAL_OPENCLAW_REPLY_URL>"
+```
+
+详见：
+
+- `docs/OPENCLAW_RUNTIME.md`
+
 ## Local smoke test
 
 See `docs/LOCAL_SMOKE_TEST.md`.
 Local smoke test result -> `docs/SMOKE_TEST_RESULT.md`.
 N8N control workflow -> `docs/N8N_CONTROL_WORKFLOW.md`.
 Real item snapshot guide -> `docs/REAL_ITEM_SNAPSHOT.md`.
+OpenClaw runtime integration -> `docs/OPENCLAW_RUNTIME.md`.
 
 ### Item context dry-run notes
 
