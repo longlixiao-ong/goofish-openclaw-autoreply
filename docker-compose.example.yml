@@ -17,6 +17,15 @@ services:
       - ./data:/workspace/data
       - ./logs:/workspace/logs
 
+  openclaw:
+    build:
+      context: ./mock-openclaw
+    restart: always
+    env_file:
+      - .env
+    expose:
+      - "18789"
+
   goofish-watcher:
     build:
       context: ./goofish-watcher
