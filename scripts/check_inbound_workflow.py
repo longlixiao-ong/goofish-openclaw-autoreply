@@ -9,6 +9,11 @@ from typing import Any
 
 
 WORKFLOW_PATH = Path("n8n/workflows/goofish-inbound.example.json")
+IF_DUP_NODE = "IF 重复消息"
+IF_DUP_TRUE_OUTPUT_INDEX = 1
+IF_DUP_FALSE_OUTPUT_INDEX = 0
+IF_DUP_TRUE_TARGET = "重复消息结束"
+IF_DUP_FALSE_TARGET = "保留原始入站消息"
 
 
 def is_meaningful(value: Any) -> bool:
@@ -234,8 +239,34 @@ def dedup_process(
     )
 
 
+def evaluate_duplicate_if_condition(payload: dict[str, Any]) -> bool:
+    is_duplicate = payload.get("is_duplicate") is True
+    is_dry_run = parse_truthy_dry_run(payload.get("dry_run"))
+    return is_duplicate and not is_dry_run
+
+
+def simulate_if_duplicate_next_node(
+    payload: dict[str, Any],
+    workflow: dict[str, Any],
+) -> str:
+    connections = workflow.get("connections", {})
+    outputs = connections.get(IF_DUP_NODE, {}).get("main", [])
+    if not isinstance(outputs, list) or len(outputs) <= max(IF_DUP_TRUE_OUTPUT_INDEX, IF_DUP_FALSE_OUTPUT_INDEX):
+        return ""
+
+    condition_true = evaluate_duplicate_if_condition(payload)
+    output_index = IF_DUP_TRUE_OUTPUT_INDEX if condition_true else IF_DUP_FALSE_OUTPUT_INDEX
+    branch = outputs[output_index] if output_index < len(outputs) else []
+    if not branch or not isinstance(branch, list):
+        return ""
+    first = branch[0] if branch else {}
+    if not isinstance(first, dict):
+        return ""
+    return str(first.get("node", ""))
+
+
 def should_route_duplicate_branch(payload: dict[str, Any]) -> bool:
-    return payload.get("is_duplicate") is True and not parse_truthy_dry_run(payload.get("dry_run"))
+    return evaluate_duplicate_if_condition(payload)
 
 
 def check_workflow_structure() -> list[str]:
@@ -285,37 +316,41 @@ def check_workflow_structure() -> list[str]:
             if snippet not in dedup_code:
                 issues.append(f"去重 jsCode missing snippet: {snippet}")
 
-    if "IF 重复消息" not in nodes:
-        issues.append("missing node: IF 重复消息")
+    if IF_DUP_NODE not in nodes:
+        issues.append(f"missing node: {IF_DUP_NODE}")
     else:
         bool_conditions = (
-            nodes["IF 重复消息"]
+            nodes[IF_DUP_NODE]
             .get("parameters", {})
             .get("conditions", {})
             .get("boolean", [])
         )
         if len(bool_conditions) != 1:
-            issues.append("IF 重复消息 should use single-expression condition")
+            issues.append(f"{IF_DUP_NODE} should use single-expression condition")
         merged = json.dumps(bool_conditions, ensure_ascii=False)
         if "is_duplicate" not in merged:
-            issues.append("IF 重复消息 missing is_duplicate condition")
+            issues.append(f"{IF_DUP_NODE} missing is_duplicate condition")
         if "dry_run" not in merged:
-            issues.append("IF 重复消息 missing dry_run guard condition")
+            issues.append(f"{IF_DUP_NODE} missing dry_run guard condition")
 
-        true_next = (
-            conns.get("IF 重复消息", {})
-            .get("main", [[{}], [{}]])[0][0]
-            .get("node", "")
-        )
-        false_next = (
-            conns.get("IF 重复消息", {})
-            .get("main", [[{}], [{}]])[1][0]
-            .get("node", "")
-        )
-        if true_next != "重复消息结束":
-            issues.append(f"IF 重复消息 true branch should go 重复消息结束 (actual={true_next})")
-        if false_next != "保留原始入站消息":
-            issues.append(f"IF 重复消息 false branch should go 保留原始入站消息 (actual={false_next})")
+        outputs = conns.get(IF_DUP_NODE, {}).get("main", [])
+        if not isinstance(outputs, list) or len(outputs) < 2:
+            issues.append(f"{IF_DUP_NODE} must have 2 outputs in connections.main")
+        else:
+            true_branch = outputs[IF_DUP_TRUE_OUTPUT_INDEX] if len(outputs) > IF_DUP_TRUE_OUTPUT_INDEX else []
+            false_branch = outputs[IF_DUP_FALSE_OUTPUT_INDEX] if len(outputs) > IF_DUP_FALSE_OUTPUT_INDEX else []
+
+            true_next = true_branch[0].get("node", "") if true_branch and isinstance(true_branch[0], dict) else ""
+            false_next = false_branch[0].get("node", "") if false_branch and isinstance(false_branch[0], dict) else ""
+
+            if true_next != IF_DUP_TRUE_TARGET:
+                issues.append(
+                    f"{IF_DUP_NODE} true output(index={IF_DUP_TRUE_OUTPUT_INDEX}) should go {IF_DUP_TRUE_TARGET} (actual={true_next})"
+                )
+            if false_next != IF_DUP_FALSE_TARGET:
+                issues.append(
+                    f"{IF_DUP_NODE} false output(index={IF_DUP_FALSE_OUTPUT_INDEX}) should go {IF_DUP_FALSE_TARGET} (actual={false_next})"
+                )
 
     restore_next = (
         conns.get("恢复原始入站消息", {})
@@ -407,6 +442,7 @@ def run_normalization_cases() -> list[str]:
 
 def run_dedup_guard_cases() -> list[str]:
     issues: list[str] = []
+    workflow = json.loads(WORKFLOW_PATH.read_text(encoding="utf-8"))
 
     for dry_value in [True, "true", 1, "1"]:
         store = {"order": ["existing"], "map": {"existing": 123}}
@@ -429,6 +465,11 @@ def run_dedup_guard_cases() -> list[str]:
             issues.append(f"dedup dry-run ({dry_value!r}) should not mutate dedup store")
         if should_route_duplicate_branch(out):
             issues.append(f"dedup dry-run ({dry_value!r}) should not route to duplicate branch")
+        dry_next = simulate_if_duplicate_next_node(out, workflow)
+        if dry_next != IF_DUP_FALSE_TARGET:
+            issues.append(
+                f"dedup dry-run ({dry_value!r}) next node should be {IF_DUP_FALSE_TARGET} (actual={dry_next})"
+            )
 
     store = {"order": [], "map": {}}
     first, store = dedup_process(
@@ -458,6 +499,11 @@ def run_dedup_guard_cases() -> list[str]:
         issues.append("dedup non-dry-run repeated message should be duplicate")
     if not should_route_duplicate_branch(second):
         issues.append("IF duplicate branch should route only for real duplicate non-dry-run")
+    duplicate_next = simulate_if_duplicate_next_node(second, workflow)
+    if duplicate_next != IF_DUP_TRUE_TARGET:
+        issues.append(
+            f"dedup non-dry-run duplicate next node should be {IF_DUP_TRUE_TARGET} (actual={duplicate_next})"
+        )
 
     guarded = {
         "is_duplicate": True,
@@ -465,6 +511,9 @@ def run_dedup_guard_cases() -> list[str]:
     }
     if should_route_duplicate_branch(guarded):
         issues.append("IF duplicate branch must block dry_run=true/'1' even when is_duplicate=true")
+    guarded_next = simulate_if_duplicate_next_node(guarded, workflow)
+    if guarded_next == IF_DUP_TRUE_TARGET:
+        issues.append("dry_run=true must never route to 重复消息结束")
 
     return issues
 

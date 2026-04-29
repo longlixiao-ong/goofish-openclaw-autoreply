@@ -548,14 +548,14 @@
       "main": [
         [
           {
-            "node": "重复消息结束",
+            "node": "保留原始入站消息",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "保留原始入站消息",
+            "node": "重复消息结束",
             "type": "main",
             "index": 0
           }
