@@ -44,6 +44,8 @@ services:
     restart: always
     env_file:
       - .env
+    environment:
+      - ITEMS_SNAPSHOT_PATH=/app/data/items_snapshot.json
     ports:
       - "127.0.0.1:8787:8787"
     volumes:
