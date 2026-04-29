@@ -14,6 +14,8 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
+from items import collect_current_account_items, write_snapshot
+
 
 LOGGER = logging.getLogger("goofish-bridge")
 
@@ -159,6 +161,95 @@ def summarize_goofish_auth_status() -> dict[str, Any]:
     }
 
 
+def get_snapshot_path() -> Path:
+    raw = os.environ.get("ITEMS_SNAPSHOT_PATH", "goofish-bridge/data/items_snapshot.json")
+    return Path(raw)
+
+
+def load_items_snapshot(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("failed to parse items snapshot at %s: %s", path, redact_sensitive(str(exc)))
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def save_items_snapshot(path: Path, payload: dict[str, Any]) -> None:
+    write_snapshot(str(path), payload)
+
+
+def load_cookie_string_from_goofish_cli() -> str:
+    cookie_file = Path.home() / ".goofish-cli" / "cookies.json"
+    if not cookie_file.exists():
+        return ""
+    try:
+        data = json.loads(cookie_file.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("failed to parse goofish cookie file: %s", redact_sensitive(str(exc)))
+        return ""
+
+    if isinstance(data, dict) and isinstance(data.get("cookie_string"), str):
+        return data["cookie_string"].strip()
+
+    cookies_data: Any = data
+    if isinstance(data, dict) and isinstance(data.get("cookies"), list):
+        cookies_data = data["cookies"]
+
+    if not isinstance(cookies_data, list):
+        return ""
+
+    pairs: list[str] = []
+    seen_names: set[str] = set()
+    for cookie in cookies_data:
+        if not isinstance(cookie, dict):
+            continue
+        name = str(cookie.get("name") or "").strip()
+        value = str(cookie.get("value") or "").strip()
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        pairs.append(f"{name}={value}")
+    return "; ".join(pairs).strip()
+
+
+def get_cookie_string() -> str:
+    env_cookie = os.environ.get("GOOFISH_COOKIE_STRING", "").strip()
+    if env_cookie:
+        return env_cookie
+    return load_cookie_string_from_goofish_cli()
+
+
+def normalize_snapshot_response(payload: dict[str, Any]) -> dict[str, Any]:
+    result = dict(payload)
+    result["ok"] = True
+    result["source"] = "snapshot"
+    result["response_source"] = "snapshot"
+    result["snapshot"] = True
+    return result
+
+
+def snapshot_not_found_response() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "reason": "snapshot_not_found",
+        "message": "items snapshot not found",
+        "items": [],
+        "item_count": 0,
+    }
+
+
+def parse_sections_param(raw_sections: str | None) -> list[str] | None:
+    if raw_sections is None:
+        return None
+    parts = [part.strip() for part in raw_sections.split(",") if part.strip()]
+    return parts or None
+
+
 @APP.on_event("startup")
 def on_startup() -> None:
     setup_logging()
@@ -172,6 +263,68 @@ def on_startup() -> None:
 @APP.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "service": "goofish-bridge"}
+
+
+@APP.get("/items/snapshot")
+def items_snapshot() -> JSONResponse:
+    snapshot_path = get_snapshot_path()
+    payload = load_items_snapshot(snapshot_path)
+    if payload is None:
+        return JSONResponse(status_code=200, content=snapshot_not_found_response())
+    return JSONResponse(status_code=200, content=normalize_snapshot_response(payload))
+
+
+@APP.get("/items/selling")
+def items_selling(
+    refresh: bool = False,
+    headless: bool = True,
+    sections: str | None = None,
+    max_scroll_rounds: int = 8,
+) -> JSONResponse:
+    snapshot_path = get_snapshot_path()
+
+    if not refresh:
+        payload = load_items_snapshot(snapshot_path)
+        if payload is None:
+            return JSONResponse(status_code=200, content=snapshot_not_found_response())
+        return JSONResponse(status_code=200, content=normalize_snapshot_response(payload))
+
+    cookie_string = get_cookie_string()
+    if not cookie_string:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": False,
+                "reason": "missing_cookie",
+                "message": "missing Goofish cookie string",
+                "items": [],
+                "item_count": 0,
+            },
+        )
+
+    safe_rounds = max(1, int(max_scroll_rounds))
+    try:
+        payload = collect_current_account_items(
+            cookie_string,
+            output_path=None,
+            headless=headless,
+            sections=parse_sections_param(sections),
+            max_scroll_rounds=safe_rounds,
+        )
+        save_items_snapshot(snapshot_path, payload)
+        return JSONResponse(status_code=200, content=payload)
+    except Exception as exc:  # noqa: BLE001
+        message = redact_sensitive(str(exc)).strip() or "item collection failed"
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": False,
+                "reason": "collection_failed",
+                "message": message,
+                "items": [],
+                "item_count": 0,
+            },
+        )
 
 
 @APP.get("/autoreply/status")
