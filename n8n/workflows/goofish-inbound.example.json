@@ -316,6 +316,40 @@
       }
     },
     {
+      "id": "DryRunIf",
+      "name": "IF dry-run 模式",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        860,
+        360
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ [true, 'true', 1, '1'].includes($json.dry_run) }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "DryRunEnd",
+      "name": "dry-run 结束",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        980,
+        200
+      ],
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    ok: true,\n    send: false,\n    dry_run: true,\n    reason: 'dry_run',\n    cid: $json.cid,\n    send_user_id: $json.send_user_id,\n    send_message: $json.send_message,\n    risk: $json.risk,\n    risk_reason: $json.risk_reason,\n    rule_reply: $json.rule_reply,\n    reply: $json.reply,\n    sanitized_reply: $json.sanitized_reply,\n    final_reply: $json.final_reply,\n    openclaw_reply_source: $json.openclaw_reply_source,\n  },\n}];"
+      }
+    },
+    {
       "id": "BridgeSend",
       "name": "goofish-bridge /send",
       "type": "n8n-nodes-base.httpRequest",
@@ -540,6 +574,24 @@
     },
     "外联词扫描": {
       "main": [
+        [
+          {
+            "node": "IF dry-run 模式",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF dry-run 模式": {
+      "main": [
+        [
+          {
+            "node": "dry-run 结束",
+            "type": "main",
+            "index": 0
+          }
+        ],
         [
           {
             "node": "goofish-bridge /send",
