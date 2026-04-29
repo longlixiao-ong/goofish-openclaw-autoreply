@@ -34,7 +34,7 @@ Steps:
 2. Validate payload.
 3. De-duplicate by `cid`, `send_user_id`, message text, optional message id and timestamp.
 4. Dry-run requests skip dedup persistence (`dedup_skipped=true`) to avoid polluting dedup store.
-5. Duplicate route guard only triggers when `is_duplicate=true` and `dry_run` is not truthy (`true/"true"/1/"1"`); false branch must continue via `保留原始入站消息`.
+5. Duplicate route guard only triggers when `is_duplicate=true` and `dry_run` is not truthy (`true/"true"/1/"1"`); true branch must go to `重复消息结束`, false branch must continue via `保留原始入站消息`.
 6. Check auto-reply state.
 7. Apply conversation cooldown.
 8. Run handoff gate classification (refund/after-sale/complaint/legal/off-platform/contact/payment/shipping/order disputes, threats/abuse, etc.).
@@ -62,6 +62,7 @@ OpenClaw response compatibility notes:
   - `send` / `shouldSend`
   - nested `data.*`, `result.*`, `output.*`
   - `final_reply`, `answer`, `choices[0].message.content`
+- `choices[0].message.content` supports bare JSON, `json\n{...}`, and Markdown fenced JSON blocks (with or without `json` language tag); fenced object fields are normalized back to `reply/should_send/handoff/reason` and the raw code block is not used as final reply.
 - HTTP failure and transport errors are treated as `system_exception` and will not be sent.
 
 Dry-run output (always `send=false`) includes:

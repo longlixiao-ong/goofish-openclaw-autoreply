@@ -45,6 +45,9 @@ def strip_markdown_fences(raw: str) -> str:
     text = raw.strip()
     if not text:
         return ""
+    json_prefix = re.match(r"^json\s*\n([\s\S]*)$", text, re.IGNORECASE)
+    if json_prefix:
+        return json_prefix.group(1).strip()
     full_fence = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", text, re.IGNORECASE)
     if full_fence:
         return full_fence.group(1).strip()
@@ -324,7 +327,7 @@ def check_workflow_structure() -> list[str]:
 
     normalize_reply_code = str(nodes.get("归一化 OpenClaw 回复", {}).get("parameters", {}).get("jsCode", ""))
     if normalize_reply_code:
-        for snippet in ["stripMarkdownFences", "fullFence", "firstFence"]:
+        for snippet in ["stripMarkdownFences", "jsonPrefix", "fullFence", "firstFence", "choices[0].message.content.object"]:
             if snippet not in normalize_reply_code:
                 issues.append(f"归一化 OpenClaw 回复 missing fenced-json snippet: {snippet}")
 
@@ -469,22 +472,27 @@ def run_dedup_guard_cases() -> list[str]:
 def run_fenced_json_cases() -> list[str]:
     issues: list[str] = []
 
-    fenced = "```json\n{\"reply\":\"在的\",\"should_send\":true,\"handoff\":false,\"reason\":\"test\"}\n```"
-    parsed = parse_json_object(fenced)
-    if not isinstance(parsed, dict):
-        issues.append("fenced json should be parsed into object")
-    else:
-        if parsed.get("reply") != "在的":
-            issues.append("fenced json reply field parse mismatch")
-        if parsed.get("should_send") is not True:
-            issues.append("fenced json should_send parse mismatch")
-        if parsed.get("handoff") is not False:
-            issues.append("fenced json handoff parse mismatch")
+    candidates = [
+        "{\"reply\":\"在的\",\"should_send\":true,\"handoff\":false,\"reason\":\"test\"}",
+        "json\n{\"reply\":\"在的\",\"should_send\":true,\"handoff\":false,\"reason\":\"test\"}\n",
+        "```json\n{\"reply\":\"在的\",\"should_send\":true,\"handoff\":false,\"reason\":\"test\"}\n```",
+        "```\n{\"reply\":\"在的\",\"should_send\":true,\"handoff\":false,\"reason\":\"test\"}\n```",
+        "模型输出如下：\n```json\n{\"reply\":\"在的\",\"should_send\":true,\"handoff\":false,\"reason\":\"test\"}\n```\n请参考",
+    ]
 
-    mixed = "模型输出如下：\n```json\n{\"reply\":\"在的\"}\n```\n请参考"
-    parsed_mixed = parse_json_object(mixed)
-    if not isinstance(parsed_mixed, dict) or parsed_mixed.get("reply") != "在的":
-        issues.append("mixed fenced json should parse first json fence block")
+    for idx, candidate in enumerate(candidates, start=1):
+        parsed = parse_json_object(candidate)
+        if not isinstance(parsed, dict):
+            issues.append(f"fenced-json case{idx} should parse into object")
+            continue
+        if parsed.get("reply") != "在的":
+            issues.append(f"fenced-json case{idx} reply parse mismatch")
+        if parsed.get("should_send") is not True:
+            issues.append(f"fenced-json case{idx} should_send parse mismatch")
+        if parsed.get("handoff") is not False:
+            issues.append(f"fenced-json case{idx} handoff parse mismatch")
+        if parsed.get("reason") != "test":
+            issues.append(f"fenced-json case{idx} reason parse mismatch")
 
     return issues
 
