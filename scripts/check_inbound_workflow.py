@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ def pick_value(*values: Any) -> Any:
 def parse_json_object(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, str):
         return None
-    text = raw.strip()
+    text = strip_markdown_fences(raw)
     if not text:
         return None
     try:
@@ -38,6 +39,19 @@ def parse_json_object(raw: Any) -> dict[str, Any] | None:
     if isinstance(parsed, dict):
         return parsed
     return None
+
+
+def strip_markdown_fences(raw: str) -> str:
+    text = raw.strip()
+    if not text:
+        return ""
+    full_fence = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", text, re.IGNORECASE)
+    if full_fence:
+        return full_fence.group(1).strip()
+    first_fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+    if first_fence:
+        return first_fence.group(1).strip()
+    return text
 
 
 def parse_truthy_dry_run(value: Any) -> bool:
@@ -243,8 +257,16 @@ def check_workflow_structure() -> list[str]:
         .get("main", [[{}]])[0][0]
         .get("node", "")
     )
-    if normalize_next != "保留原始入站消息":
-        issues.append(f"入站归一化 is not wired to 保留原始入站消息 (actual={normalize_next})")
+    if normalize_next != "去重":
+        issues.append(f"入站归一化 is not wired to 去重 (actual={normalize_next})")
+
+    dedup_next = (
+        conns.get("去重", {})
+        .get("main", [[{}]])[0][0]
+        .get("node", "")
+    )
+    if dedup_next != "IF 重复消息":
+        issues.append(f"去重 is not wired to IF 重复消息 (actual={dedup_next})")
 
     if "入站归一化" in nodes:
         code = str(nodes["入站归一化"].get("parameters", {}).get("jsCode", ""))
@@ -269,14 +291,42 @@ def check_workflow_structure() -> list[str]:
             .get("conditions", {})
             .get("boolean", [])
         )
-        if len(bool_conditions) < 2:
-            issues.append("IF 重复消息 should contain duplicate + dry_run guard conditions")
-        else:
-            merged = json.dumps(bool_conditions, ensure_ascii=False)
-            if "is_duplicate" not in merged:
-                issues.append("IF 重复消息 missing is_duplicate condition")
-            if "dry_run" not in merged:
-                issues.append("IF 重复消息 missing dry_run guard condition")
+        if len(bool_conditions) != 1:
+            issues.append("IF 重复消息 should use single-expression condition")
+        merged = json.dumps(bool_conditions, ensure_ascii=False)
+        if "is_duplicate" not in merged:
+            issues.append("IF 重复消息 missing is_duplicate condition")
+        if "dry_run" not in merged:
+            issues.append("IF 重复消息 missing dry_run guard condition")
+
+        true_next = (
+            conns.get("IF 重复消息", {})
+            .get("main", [[{}], [{}]])[0][0]
+            .get("node", "")
+        )
+        false_next = (
+            conns.get("IF 重复消息", {})
+            .get("main", [[{}], [{}]])[1][0]
+            .get("node", "")
+        )
+        if true_next != "重复消息结束":
+            issues.append(f"IF 重复消息 true branch should go 重复消息结束 (actual={true_next})")
+        if false_next != "保留原始入站消息":
+            issues.append(f"IF 重复消息 false branch should go 保留原始入站消息 (actual={false_next})")
+
+    restore_next = (
+        conns.get("恢复原始入站消息", {})
+        .get("main", [[{}]])[0][0]
+        .get("node", "")
+    )
+    if restore_next and restore_next != "会话冷却":
+        issues.append(f"恢复原始入站消息 should continue to 会话冷却 after dedup (actual={restore_next})")
+
+    normalize_reply_code = str(nodes.get("归一化 OpenClaw 回复", {}).get("parameters", {}).get("jsCode", ""))
+    if normalize_reply_code:
+        for snippet in ["stripMarkdownFences", "fullFence", "firstFence"]:
+            if snippet not in normalize_reply_code:
+                issues.append(f"归一化 OpenClaw 回复 missing fenced-json snippet: {snippet}")
 
     return issues
 
@@ -416,11 +466,35 @@ def run_dedup_guard_cases() -> list[str]:
     return issues
 
 
+def run_fenced_json_cases() -> list[str]:
+    issues: list[str] = []
+
+    fenced = "```json\n{\"reply\":\"在的\",\"should_send\":true,\"handoff\":false,\"reason\":\"test\"}\n```"
+    parsed = parse_json_object(fenced)
+    if not isinstance(parsed, dict):
+        issues.append("fenced json should be parsed into object")
+    else:
+        if parsed.get("reply") != "在的":
+            issues.append("fenced json reply field parse mismatch")
+        if parsed.get("should_send") is not True:
+            issues.append("fenced json should_send parse mismatch")
+        if parsed.get("handoff") is not False:
+            issues.append("fenced json handoff parse mismatch")
+
+    mixed = "模型输出如下：\n```json\n{\"reply\":\"在的\"}\n```\n请参考"
+    parsed_mixed = parse_json_object(mixed)
+    if not isinstance(parsed_mixed, dict) or parsed_mixed.get("reply") != "在的":
+        issues.append("mixed fenced json should parse first json fence block")
+
+    return issues
+
+
 def main() -> int:
     issues: list[str] = []
     issues.extend(check_workflow_structure())
     issues.extend(run_normalization_cases())
     issues.extend(run_dedup_guard_cases())
+    issues.extend(run_fenced_json_cases())
 
     report = {
         "ok": len(issues) == 0,
