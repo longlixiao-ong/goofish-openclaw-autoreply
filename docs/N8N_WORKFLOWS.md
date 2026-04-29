@@ -38,6 +38,16 @@ Steps:
 10. Send gate (fail closed): block send on `handoff=true`, `should_send=false`, empty reply, or any system exception.
 11. Non-dry-run send path must go through `POST /send` only.
 
+OpenClaw runtime mode selection:
+
+- `OPENCLAW_RUNTIME_MODE=custom_reply`
+  - Calls `OPENCLAW_REPLY_URL`
+  - Sends custom payload (`cid/toid/message/item_context/customer_service_policy/...`)
+- `OPENCLAW_RUNTIME_MODE=openai_chat`
+  - Calls `OPENCLAW_CHAT_COMPLETIONS_URL`
+  - Sends OpenAI Chat Completions payload
+  - Adds `Authorization: Bearer {{$env.OPENCLAW_GATEWAY_TOKEN}}`
+
 OpenClaw response compatibility notes:
 
 - Preferred fields: `reply`, `should_send`, `handoff`, `reason`
