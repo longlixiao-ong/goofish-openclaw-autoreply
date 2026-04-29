@@ -174,7 +174,7 @@
         "url": "http://goofish-bridge:8787/send",
         "sendBody": true,
         "contentType": "json",
-        "jsonBody": "={\"cid\": $json.cid, \"toid\": $json.send_user_id, \"text\": $json.final_reply}"
+        "jsonBody": "={{ { \"cid\": $json.cid, \"toid\": $json.send_user_id, \"text\": $json.final_reply } }}"
       }
     },
     {

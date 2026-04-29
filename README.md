@@ -1092,10 +1092,10 @@ goofish message watch
 
 ```powershell
 # 1) 复制示例配置
-Copy-Item .env.example .env
+Copy-Item docker-compose.example.yml docker-compose.yml
 
 # 2) 启动正式链路服务
-docker compose -f docker-compose.yml up -d n8n goofish-watcher goofish-bridge
+docker compose up -d n8n goofish-watcher goofish-bridge
 
 # 3) 查看 bridge 日志
 docker compose logs -f goofish-bridge
