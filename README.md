@@ -1155,3 +1155,4 @@ python -m json.tool n8n/workflows/goofish-inbound.example.json
 ## Local smoke test
 
 See `docs/LOCAL_SMOKE_TEST.md`.
+Local smoke test result -> `docs/SMOKE_TEST_RESULT.md`.
