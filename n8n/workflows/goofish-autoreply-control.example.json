@@ -1,0 +1,130 @@
+{
+  "name": "goofish-autoreply-control.example",
+  "active": false,
+  "settings": {},
+  "nodes": [
+    {
+      "id": "AutoStartWebhook",
+      "name": "Webhook 自动客服开启",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1240,
+        200
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "goofish-autoreply/start",
+        "responseMode": "lastNode"
+      }
+    },
+    {
+      "id": "AutoStartRequest",
+      "name": "goofish-bridge /autoreply/start",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -980,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://goofish-bridge:8787/autoreply/start"
+      }
+    },
+    {
+      "id": "AutoStopWebhook",
+      "name": "Webhook 自动客服关闭",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1240,
+        380
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "goofish-autoreply/stop",
+        "responseMode": "lastNode"
+      }
+    },
+    {
+      "id": "AutoStopRequest",
+      "name": "goofish-bridge /autoreply/stop",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -980,
+        380
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://goofish-bridge:8787/autoreply/stop"
+      }
+    },
+    {
+      "id": "AutoStatusWebhook",
+      "name": "Webhook 自动客服状态",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1240,
+        560
+      ],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "goofish-autoreply/status",
+        "responseMode": "lastNode"
+      }
+    },
+    {
+      "id": "AutoStatusRequest",
+      "name": "goofish-bridge /autoreply/status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -980,
+        560
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "http://goofish-bridge:8787/autoreply/status"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook 自动客服开启": {
+      "main": [
+        [
+          {
+            "node": "goofish-bridge /autoreply/start",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook 自动客服关闭": {
+      "main": [
+        [
+          {
+            "node": "goofish-bridge /autoreply/stop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook 自动客服状态": {
+      "main": [
+        [
+          {
+            "node": "goofish-bridge /autoreply/status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}
