@@ -202,6 +202,8 @@ def send(payload: SendRequest) -> JSONResponse:
             status_code=400,
             content={
                 "ok": False,
+                "sent": False,
+                "reason": "invalid_request",
                 "cid": cid,
                 "toid": toid,
                 "exit_code": 2,
@@ -216,11 +218,43 @@ def send(payload: SendRequest) -> JSONResponse:
             status_code=400,
             content={
                 "ok": False,
+                "sent": False,
+                "reason": "text_too_long",
                 "cid": cid,
                 "toid": toid,
                 "exit_code": 2,
                 "stdout": "",
                 "stderr": f"text is too long, max={max_reply_chars}",
+            },
+        )
+
+    state = load_autoreply_state()
+    if state.get("enabled") is not True:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "sent": False,
+                "reason": "autoreply_disabled",
+                "cid": cid,
+                "toid": toid,
+                "exit_code": 3,
+                "stdout": "",
+                "stderr": "autoreply is disabled",
+            },
+        )
+    if state.get("auto_send") is not True:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "sent": False,
+                "reason": "auto_send_disabled",
+                "cid": cid,
+                "toid": toid,
+                "exit_code": 3,
+                "stdout": "",
+                "stderr": "auto_send is disabled",
             },
         )
 
@@ -231,6 +265,8 @@ def send(payload: SendRequest) -> JSONResponse:
     )
     response = {
         "ok": result["ok"],
+        "sent": result["ok"],
+        "reason": "sent" if result["ok"] else "goofish_send_failed",
         "cid": cid,
         "toid": toid,
         "exit_code": result["exit_code"],
