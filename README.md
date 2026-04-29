@@ -1151,3 +1151,7 @@ python -m json.tool n8n/workflows/goofish-inbound.example.json
 - 测试只做编译和 JSON 结构校验。
 - 不运行真实 `goofish message send` 测试。
 - 不运行真实闲鱼发送测试。
+
+## Local smoke test
+
+See `docs/LOCAL_SMOKE_TEST.md`.
