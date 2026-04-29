@@ -1147,6 +1147,10 @@ curl http://localhost:8787/autoreply/status
 - OpenClaw 地址通过 `.env` 中 `OPENCLAW_REPLY_URL` 配置：
   - 默认 mock：`http://openclaw:18789/reply`
   - 真实 OpenClaw：`http://<real-host>:<port>/reply` 或 `https://<domain>/reply`
+- `/send` 作为最终安全闸门（bridge fail-closed）：
+  - `safe_mode=true` 时会在 bridge 侧再次拦截外联词和异常文本
+  - `safe_mode=true` 时会执行 `global_send_interval_seconds` 全局发送间隔
+  - 命中拦截返回 `ok=false/sent=false/reason=...`，且不会调用 `goofish message send`
 - 开关节点必须调用：
   - `POST http://goofish-bridge:8787/autoreply/start`
   - `POST http://goofish-bridge:8787/autoreply/stop`
@@ -1229,6 +1233,23 @@ python scripts/test_openclaw_reply.py --url "<YOUR_REAL_OPENCLAW_REPLY_URL>"
 详见：
 
 - `docs/OPENCLAW_RUNTIME.md`
+
+### 20.8 Bridge send guard 离线验证（不发送）
+
+新增脚本：`scripts/test_bridge_send_guard.py`
+
+用途：
+
+- 离线验证 `/send` 拦截逻辑（不走网络、不调用真实 goofish）
+- 验证外联词拦截不会触发 goofish 发送
+- 验证全局发送间隔不会触发 goofish 发送
+- 验证 `safe_mode=false` 时仍受基础限制（如 `text_too_long`）
+
+示例：
+
+```powershell
+python scripts/test_bridge_send_guard.py
+```
 
 ## Local smoke test
 

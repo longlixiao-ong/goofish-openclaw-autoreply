@@ -61,6 +61,35 @@ Response shape:
 }
 ```
 
+Blocked response shape:
+
+```json
+{
+  "ok": false,
+  "sent": false,
+  "reason": "external_contact_blocked",
+  "cid": "123",
+  "toid": "456",
+  "exit_code": 4,
+  "stdout": "",
+  "stderr": "external contact keyword blocked: 微信"
+}
+```
+
+## Final send guard (`/send`)
+
+`/send` is the final fail-closed safety gate before `goofish message send`.
+
+When `safe_mode=true` in autoreply state, `/send` enforces:
+
+- External-contact word blocking (`微信`, `QQ`, `支付宝`, `银行卡`, `转账`, `私聊`, `加我`, `线下`, `电话`, `手机号`, `vx`, `v信`, `wechat`)
+- Abnormal text blocking (empty-like abnormal output, punctuation-only, traceback/exception/error leak, `<think>`/reasoning leak)
+- Global rate limit (`global_send_interval_seconds`) based on last successful send
+
+If blocked, `/send` returns `ok=false`, `sent=false`, clear `reason`, and does **not** call `goofish message send`.
+
+Rate-limited requests return HTTP `429` with `reason=global_rate_limited`.
+
 ## Read-only item snapshot refresh
 
 ```bash
