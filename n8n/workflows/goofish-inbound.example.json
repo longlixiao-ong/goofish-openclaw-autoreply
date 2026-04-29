@@ -41,7 +41,7 @@
         280
       ],
       "parameters": {
-        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst MAX_DEDUP_KEYS = 500;\n\nconst getDedupStore = () => {\n  if (!staticData.dedupStore || typeof staticData.dedupStore !== 'object') {\n    staticData.dedupStore = { order: [], map: {} };\n  }\n  const dedupStore = staticData.dedupStore;\n  if (!Array.isArray(dedupStore.order)) dedupStore.order = [];\n  if (!dedupStore.map || typeof dedupStore.map !== 'object') dedupStore.map = {};\n  return dedupStore;\n};\n\nreturn items.map((item) => {\n  const cid = String(item.json.cid ?? '').trim();\n  const sendUserId = String(item.json.send_user_id ?? '').trim();\n  const sendMessage = String(item.json.send_message ?? '').trim();\n  const dedupKey = `${cid}::${sendUserId}::${sendMessage}`;\n  const isDryRun = [true, 'true', 1, '1'].includes(item.json.dry_run);\n\n  if (isDryRun) {\n    return {\n      json: {\n        ...item.json,\n        dry_run: true,\n        dedup_key: dedupKey,\n        is_duplicate: false,\n        dedup_skipped: true,\n        dedup_skip_reason: 'dry_run',\n      },\n    };\n  }\n\n  const dedupStore = getDedupStore();\n  const isDuplicate = Boolean(dedupStore.map[dedupKey]);\n\n  if (!isDuplicate) {\n    dedupStore.map[dedupKey] = Date.now();\n    dedupStore.order.push(dedupKey);\n\n    while (dedupStore.order.length > MAX_DEDUP_KEYS) {\n      const oldest = dedupStore.order.shift();\n      if (oldest) delete dedupStore.map[oldest];\n    }\n  }\n\n  if (isDuplicate) {\n    return {\n      json: {\n        ...item.json,\n        dedup_key: dedupKey,\n        is_duplicate: true,\n        ok: true,\n        send: false,\n        reason: 'duplicate_message',\n        message: 'duplicate message skipped',\n        cid,\n        send_user_id: sendUserId,\n      },\n    };\n  }\n\n  return {\n    json: {\n      ...item.json,\n      dedup_key: dedupKey,\n      is_duplicate: false,\n    },\n  };\n});"
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst MAX_DEDUP_KEYS = 500;\n\nconst isTruthy = (value) => {\n  if (value === true || value === 1) return true;\n  if (typeof value === 'string') {\n    const lowered = value.trim().toLowerCase();\n    return lowered === 'true' || lowered === '1';\n  }\n  return false;\n};\n\nconst getDedupStore = () => {\n  if (!staticData.dedupStore || typeof staticData.dedupStore !== 'object') {\n    staticData.dedupStore = { order: [], map: {} };\n  }\n  const dedupStore = staticData.dedupStore;\n  if (!Array.isArray(dedupStore.order)) dedupStore.order = [];\n  if (!dedupStore.map || typeof dedupStore.map !== 'object') dedupStore.map = {};\n  return dedupStore;\n};\n\nreturn items.map((item) => {\n  const cid = String(item.json.cid ?? '').trim();\n  const sendUserId = String(item.json.send_user_id ?? '').trim();\n  const sendMessage = String(item.json.send_message ?? '').trim();\n  const dedupKey = `${cid}::${sendUserId}::${sendMessage}`;\n  const isDryRun = isTruthy(item.json.dry_run);\n\n  if (isDryRun) {\n    return {\n      json: {\n        ...item.json,\n        dry_run: true,\n        dedup_key: dedupKey,\n        is_duplicate: false,\n        dedup_skipped: true,\n        dedup_skip_reason: 'dry_run',\n      },\n    };\n  }\n\n  const dedupStore = getDedupStore();\n  const isDuplicate = Boolean(dedupStore.map[dedupKey]);\n\n  if (!isDuplicate) {\n    dedupStore.map[dedupKey] = Date.now();\n    dedupStore.order.push(dedupKey);\n\n    while (dedupStore.order.length > MAX_DEDUP_KEYS) {\n      const oldest = dedupStore.order.shift();\n      if (oldest) delete dedupStore.map[oldest];\n    }\n  }\n\n  if (isDuplicate) {\n    return {\n      json: {\n        ...item.json,\n        dedup_key: dedupKey,\n        is_duplicate: true,\n        ok: true,\n        send: false,\n        reason: 'duplicate_message',\n        message: 'duplicate message skipped',\n        cid,\n        send_user_id: sendUserId,\n      },\n    };\n  }\n\n  return {\n    json: {\n      ...item.json,\n      dedup_key: dedupKey,\n      is_duplicate: false,\n    },\n  };\n});"
       }
     },
     {
@@ -57,7 +57,12 @@
         "conditions": {
           "boolean": [
             {
-              "value1": "={{$json.is_duplicate}}",
+              "value1": "={{$json.is_duplicate === true}}",
+              "operation": "equal",
+              "value2": true
+            },
+            {
+              "value1": "={{![true, 'true', 1, '1'].includes($json.dry_run)}}",
               "operation": "equal",
               "value2": true
             }
@@ -75,7 +80,7 @@
         120
       ],
       "parameters": {
-        "jsCode": "return [{\n  json: {\n    ok: true,\n    send: false,\n    reason: 'duplicate_message',\n    message: 'duplicate message skipped',\n    cid: $json.cid ?? '',\n    send_user_id: $json.send_user_id ?? '',\n  },\n}];"
+        "jsCode": "const isTruthy = (value) => {\n  if (value === true || value === 1) return true;\n  if (typeof value === 'string') {\n    const lowered = value.trim().toLowerCase();\n    return lowered === 'true' || lowered === '1';\n  }\n  return false;\n};\n\nif (isTruthy($json.dry_run)) {\n  return [{\n    json: {\n      ok: true,\n      send: false,\n      reason: 'dry_run_dedup_guard',\n      message: 'dry_run should not enter duplicate branch',\n      cid: $json.cid ?? '',\n      send_user_id: $json.send_user_id ?? '',\n      dry_run: true,\n      is_duplicate: false,\n      dedup_skipped: true,\n      dedup_skip_reason: 'dry_run',\n    },\n  }];\n}\n\nreturn [{\n  json: {\n    ok: true,\n    send: false,\n    reason: 'duplicate_message',\n    message: 'duplicate message skipped',\n    cid: $json.cid ?? '',\n    send_user_id: $json.send_user_id ?? '',\n  },\n}];"
       }
     },
     {

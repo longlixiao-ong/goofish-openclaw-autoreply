@@ -155,6 +155,72 @@ def normalize_payload(root: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def dedup_process(
+    payload: dict[str, Any],
+    dedup_store: dict[str, Any],
+    now_ms: int = 0,
+    max_dedup_keys: int = 500,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    cid = str(payload.get("cid") or "").strip()
+    send_user_id = str(payload.get("send_user_id") or "").strip()
+    send_message = str(payload.get("send_message") or "").strip()
+    dedup_key = f"{cid}::{send_user_id}::{send_message}"
+    is_dry_run = parse_truthy_dry_run(payload.get("dry_run"))
+
+    if is_dry_run:
+        return (
+            {
+                **payload,
+                "dry_run": True,
+                "dedup_key": dedup_key,
+                "is_duplicate": False,
+                "dedup_skipped": True,
+                "dedup_skip_reason": "dry_run",
+            },
+            dedup_store,
+        )
+
+    order = dedup_store.setdefault("order", [])
+    dedup_map = dedup_store.setdefault("map", {})
+    is_duplicate = bool(dedup_map.get(dedup_key))
+
+    if not is_duplicate:
+        dedup_map[dedup_key] = now_ms
+        order.append(dedup_key)
+        while len(order) > max_dedup_keys:
+            oldest = order.pop(0)
+            dedup_map.pop(oldest, None)
+
+    if is_duplicate:
+        return (
+            {
+                **payload,
+                "dedup_key": dedup_key,
+                "is_duplicate": True,
+                "ok": True,
+                "send": False,
+                "reason": "duplicate_message",
+                "message": "duplicate message skipped",
+                "cid": cid,
+                "send_user_id": send_user_id,
+            },
+            dedup_store,
+        )
+
+    return (
+        {
+            **payload,
+            "dedup_key": dedup_key,
+            "is_duplicate": False,
+        },
+        dedup_store,
+    )
+
+
+def should_route_duplicate_branch(payload: dict[str, Any]) -> bool:
+    return payload.get("is_duplicate") is True and not parse_truthy_dry_run(payload.get("dry_run"))
+
+
 def check_workflow_structure() -> list[str]:
     issues: list[str] = []
     workflow = json.loads(WORKFLOW_PATH.read_text(encoding="utf-8"))
@@ -185,6 +251,32 @@ def check_workflow_structure() -> list[str]:
         for snippet in ["root.body", "dry_run", "original_payload", "webhook_meta"]:
             if snippet not in code:
                 issues.append(f"入站归一化 jsCode missing snippet: {snippet}")
+
+    if "去重" not in nodes:
+        issues.append("missing node: 去重")
+    else:
+        dedup_code = str(nodes["去重"].get("parameters", {}).get("jsCode", ""))
+        for snippet in ["isTruthy", "dedup_skipped", "dedup_skip_reason: 'dry_run'"]:
+            if snippet not in dedup_code:
+                issues.append(f"去重 jsCode missing snippet: {snippet}")
+
+    if "IF 重复消息" not in nodes:
+        issues.append("missing node: IF 重复消息")
+    else:
+        bool_conditions = (
+            nodes["IF 重复消息"]
+            .get("parameters", {})
+            .get("conditions", {})
+            .get("boolean", [])
+        )
+        if len(bool_conditions) < 2:
+            issues.append("IF 重复消息 should contain duplicate + dry_run guard conditions")
+        else:
+            merged = json.dumps(bool_conditions, ensure_ascii=False)
+            if "is_duplicate" not in merged:
+                issues.append("IF 重复消息 missing is_duplicate condition")
+            if "dry_run" not in merged:
+                issues.append("IF 重复消息 missing dry_run guard condition")
 
     return issues
 
@@ -260,10 +352,75 @@ def run_normalization_cases() -> list[str]:
     return issues
 
 
+def run_dedup_guard_cases() -> list[str]:
+    issues: list[str] = []
+
+    for dry_value in [True, "true", 1, "1"]:
+        store = {"order": ["existing"], "map": {"existing": 123}}
+        before = json.loads(json.dumps(store, ensure_ascii=False))
+        out, after = dedup_process(
+            {
+                "cid": "dry-cid",
+                "send_user_id": "dry-user",
+                "send_message": "dry-message",
+                "dry_run": dry_value,
+            },
+            store,
+            now_ms=999,
+        )
+        if out.get("is_duplicate") is not False:
+            issues.append(f"dedup dry-run ({dry_value!r}) should force is_duplicate=false")
+        if out.get("dedup_skipped") is not True or out.get("dedup_skip_reason") != "dry_run":
+            issues.append(f"dedup dry-run ({dry_value!r}) should set dedup_skipped flags")
+        if after != before:
+            issues.append(f"dedup dry-run ({dry_value!r}) should not mutate dedup store")
+        if should_route_duplicate_branch(out):
+            issues.append(f"dedup dry-run ({dry_value!r}) should not route to duplicate branch")
+
+    store = {"order": [], "map": {}}
+    first, store = dedup_process(
+        {
+            "cid": "c",
+            "send_user_id": "u",
+            "send_message": "m",
+            "dry_run": False,
+        },
+        store,
+        now_ms=111,
+    )
+    second, store = dedup_process(
+        {
+            "cid": "c",
+            "send_user_id": "u",
+            "send_message": "m",
+            "dry_run": False,
+        },
+        store,
+        now_ms=222,
+    )
+
+    if first.get("is_duplicate") is not False:
+        issues.append("dedup non-dry-run first message should not be duplicate")
+    if second.get("is_duplicate") is not True:
+        issues.append("dedup non-dry-run repeated message should be duplicate")
+    if not should_route_duplicate_branch(second):
+        issues.append("IF duplicate branch should route only for real duplicate non-dry-run")
+
+    guarded = {
+        "is_duplicate": True,
+        "dry_run": "1",
+    }
+    if should_route_duplicate_branch(guarded):
+        issues.append("IF duplicate branch must block dry_run=true/'1' even when is_duplicate=true")
+
+    return issues
+
+
 def main() -> int:
     issues: list[str] = []
     issues.extend(check_workflow_structure())
     issues.extend(run_normalization_cases())
+    issues.extend(run_dedup_guard_cases())
 
     report = {
         "ok": len(issues) == 0,

@@ -34,15 +34,16 @@ Steps:
 2. Validate payload.
 3. De-duplicate by `cid`, `send_user_id`, message text, optional message id and timestamp.
 4. Dry-run requests skip dedup persistence (`dedup_skipped=true`) to avoid polluting dedup store.
-5. Check auto-reply state.
-6. Apply conversation cooldown.
-7. Run handoff gate classification (refund/after-sale/complaint/legal/off-platform/contact/payment/shipping/order disputes, threats/abuse, etc.).
-8. If handoff gate hits: `handoff=true`, stop before OpenClaw and before `/send`.
-9. If handoff gate does not hit: read `GET /items/snapshot`, attach `item_context`, then call OpenClaw.
-10. Normalize OpenClaw response contract: `reply`, `should_send`, `handoff`, `reason`.
-11. Sanitize reply and run external-contact scan.
-12. Send gate (fail closed): block send on `handoff=true`, `should_send=false`, empty reply, or any system exception.
-13. Non-dry-run send path must go through `POST /send` only.
+5. Duplicate route guard only triggers when `is_duplicate=true` and `dry_run` is not truthy (`true/"true"/1/"1"`).
+6. Check auto-reply state.
+7. Apply conversation cooldown.
+8. Run handoff gate classification (refund/after-sale/complaint/legal/off-platform/contact/payment/shipping/order disputes, threats/abuse, etc.).
+9. If handoff gate hits: `handoff=true`, stop before OpenClaw and before `/send`.
+10. If handoff gate does not hit: read `GET /items/snapshot`, attach `item_context`, then call OpenClaw.
+11. Normalize OpenClaw response contract: `reply`, `should_send`, `handoff`, `reason`.
+12. Sanitize reply and run external-contact scan.
+13. Send gate (fail closed): block send on `handoff=true`, `should_send=false`, empty reply, or any system exception.
+14. Non-dry-run send path must go through `POST /send` only.
 
 OpenClaw runtime mode selection:
 
