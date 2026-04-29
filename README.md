@@ -5,6 +5,35 @@
 > `n8n` 负责编排流程、自动客服开关、去重、冷却、发送队列、风控分流。  
 > `OpenClaw` 负责模型、视觉理解、回复策略、记忆、小刀议价规则。
 
+## 正式运行闭环（当前实现）
+
+当前正式链路已落地为：
+
+```text
+goofish-watcher -> n8n webhook -> goofish-bridge /autoreply/decide
+  -> (send=true) goofish-bridge /send -> goofish message send
+```
+
+核心原则：
+
+- n8n 只编排，不承载核心业务决策。
+- 核心决策在 `goofish-bridge /autoreply/decide`：
+  - 入站归一化
+  - 状态检查
+  - dedup / cooldown（持久化）
+  - 转人工门控
+  - item_context 读取
+  - OpenAI-compatible runtime 调用与归一化
+  - fail-closed
+- 真实发送只允许走 `goofish-bridge /send`（最终安全闸门）。
+- `dry_run=true` 永远不发送。
+
+请先阅读：
+
+- `docs/PRODUCTION_RUNBOOK.md`
+- `docs/N8N_WORKFLOWS.md`
+- `goofish-bridge/README.md`
+
 ---
 
 ## 1. 项目目标

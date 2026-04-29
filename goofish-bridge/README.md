@@ -1,11 +1,15 @@
 # goofish-bridge
 
-Long-running HTTP service for n8n to call goofish-cli send and auto-reply switch.
+`goofish-bridge` is the production runtime core for inbound autoreply decision and final send guard.
 
-This service does not bypass goofish-cli limits or platform controls. It only wraps the official CLI calls:
+Responsibilities:
 
-- `goofish message send`
-- `goofish auth status`
+- `/autoreply/decide`: normalize inbound payload, state checks, dedup, cooldown, handoff gate, item context, OpenAI-compatible runtime call, fail-closed decision.
+- `/send`: final send guard and `goofish message send` execution.
+- `/autoreply/start|stop|status`: runtime switch.
+- `/items/snapshot*`: item context source.
+
+`goofish-bridge` does not bypass `goofish-cli` and does not bypass platform controls.
 
 ## Endpoints
 
@@ -15,53 +19,127 @@ GET  /status
 GET  /items/snapshot
 GET  /items/selling
 POST /items/snapshot/refresh
-POST /send
+
+GET  /autoreply/status
 POST /autoreply/start
 POST /autoreply/stop
-GET  /autoreply/status
+POST /autoreply/decide
+
+POST /send
 ```
+
+## Auth
+
+If `BRIDGE_AUTH_TOKEN` is configured, these endpoints require:
+
+```text
+X-Bridge-Token: <BRIDGE_AUTH_TOKEN>
+```
+
+Required at minimum:
+
+- `/autoreply/decide`
+- `/send`
+
+Current implementation also protects `/autoreply/start|stop|status`.
 
 ## Environment
 
 ```env
 GOOFISH_BRIDGE_HOST=0.0.0.0
 GOOFISH_BRIDGE_PORT=8787
+
 MAX_REPLY_CHARS=80
-AUTOREPLY_STATE_FILE=/app/data/autoreply-state.json
-ITEMS_SNAPSHOT_PATH=/app/data/items_snapshot.json
 GOOFISH_SEND_TIMEOUT_SECONDS=30
 GOOFISH_AUTH_STATUS_TIMEOUT_SECONDS=15
+
+BRIDGE_AUTH_TOKEN=replace-with-strong-random-token
+
+AUTOREPLY_STATE_FILE=/app/data/autoreply-state.json
+AUTOREPLY_RUNTIME_STATE_FILE=/app/data/autoreply-runtime-state.json
+ITEMS_SNAPSHOT_PATH=/app/data/items_snapshot.json
+
+OPENCLAW_RUNTIME_MODE=openai_chat
+OPENCLAW_CHAT_COMPLETIONS_URL=http://host.docker.internal:18789/v1/chat/completions
+OPENCLAW_GATEWAY_TOKEN=replace-with-token
+OPENCLAW_MODEL=openclaw/default
+OPENCLAW_TIMEOUT_SECONDS=20
+
+HANDOFF_NOTIFY_WEBHOOK_URL=
 ```
 
-## Local run
+## Runtime State
 
-```bash
-pip install -r requirements.txt
-uvicorn app:APP --host 0.0.0.0 --port 8787
+- `AUTOREPLY_STATE_FILE`: switch and guard config (`enabled`, `auto_send`, `safe_mode`, etc.).
+- `AUTOREPLY_RUNTIME_STATE_FILE`: dedup/cooldown/runtime counters:
+  - `dedup_order` / `dedup_map`
+  - `cooldown_store`
+  - `last_success_send_at`
+
+Writes are atomic (`.tmp` + `os.replace`) with lock protection.
+
+## `/autoreply/decide` input
+
+Supports direct payload:
+
+```json
+{
+  "cid": "...",
+  "send_user_id": "...",
+  "send_message": "...",
+  "content_type": 1,
+  "dry_run": true,
+  "cooldown_seconds": 15,
+  "max_reply_chars": 120,
+  "item_id": "optional"
+}
 ```
 
-## Send API example
+Also supports webhook wrapper:
 
-```bash
-curl -X POST http://localhost:8787/send \
-  -H "Content-Type: application/json" \
-  -d '{"cid":"123","toid":"456","text":"在的，喜欢可拍"}'
+```json
+{
+  "body": { "...": "..." },
+  "headers": {},
+  "query": {},
+  "params": {}
+}
 ```
 
-Response shape:
+## `/autoreply/decide` output (core fields)
 
 ```json
 {
   "ok": true,
-  "cid": "123",
-  "toid": "456",
-  "exit_code": 0,
-  "stdout": "...",
-  "stderr": ""
+  "send": false,
+  "reason": "dry_run",
+  "cid": "...",
+  "send_user_id": "...",
+  "send_message": "...",
+  "dry_run": true,
+  "handoff": false,
+  "handoff_reason": "",
+  "should_send": true,
+  "final_reply": "...",
+  "reply_source": "...",
+  "item_context_status": "available",
+  "item_context_reason": "",
+  "openai_runtime_url": "...",
+  "openai_model": "openclaw/default",
+  "openai_response": {},
+  "error": ""
 }
 ```
 
-Blocked response shape:
+## `/send` final guard
+
+When `safe_mode=true`, `/send` blocks:
+
+- external contact words (微信/QQ/支付宝/银行卡/转账/私聊/加我/线下/电话/手机号/vx/v信/wechat)
+- abnormal text (empty/punctuation-only/traceback/exception/reasoning leak)
+- global interval (`global_send_interval_seconds`)
+
+`/send` always fail-closed and returns structured failure:
 
 ```json
 {
@@ -76,29 +154,9 @@ Blocked response shape:
 }
 ```
 
-## Final send guard (`/send`)
-
-`/send` is the final fail-closed safety gate before `goofish message send`.
-
-When `safe_mode=true` in autoreply state, `/send` enforces:
-
-- External-contact word blocking (`微信`, `QQ`, `支付宝`, `银行卡`, `转账`, `私聊`, `加我`, `线下`, `电话`, `手机号`, `vx`, `v信`, `wechat`)
-- Abnormal text blocking (empty-like abnormal output, punctuation-only, traceback/exception/error leak, `<think>`/reasoning leak)
-- Global rate limit (`global_send_interval_seconds`) based on last successful send
-
-If blocked, `/send` returns `ok=false`, `sent=false`, clear `reason`, and does **not** call `goofish message send`.
-
-Rate-limited requests return HTTP `429` with `reason=global_rate_limited`.
-
-## Read-only item snapshot refresh
+## Local run
 
 ```bash
-# refresh from current logged-in account (read-only collection)
-curl "http://localhost:8787/items/selling?refresh=true"
-
-# or explicit refresh endpoint
-curl -X POST "http://localhost:8787/items/snapshot/refresh"
-
-# read current snapshot used by n8n item_context chain
-curl "http://localhost:8787/items/snapshot"
+pip install -r requirements.txt
+uvicorn app:APP --host 0.0.0.0 --port 8787
 ```

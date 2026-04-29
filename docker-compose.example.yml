@@ -1,7 +1,6 @@
 services:
-  # n8n reads OPENCLAW_REPLY_URL from .env.
-  # - mock mode (default): OPENCLAW_REPLY_URL=http://openclaw:18789/reply
-  # - real mode: point OPENCLAW_REPLY_URL to your real OpenClaw /reply endpoint
+  # n8n orchestration runtime.
+  # Production mode calls goofish-bridge /autoreply/decide and /send only.
   n8n:
     image: n8nio/n8n:latest
     restart: always
@@ -14,16 +13,14 @@ services:
       - N8N_PORT=5678
       - N8N_PROTOCOL=http
       - TZ=Asia/Shanghai
-      - OPENCLAW_REPLY_URL=${OPENCLAW_REPLY_URL:-http://openclaw:18789/reply}
+      - BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN}
     volumes:
       - ./n8n_data:/home/node/.n8n
       - ./n8n:/workspace/n8n
       - ./data:/workspace/data
       - ./logs:/workspace/logs
 
-  # Local default mock OpenClaw.
-  # In real OpenClaw mode, keep this service defined for quick rollback,
-  # but you can choose not to start it.
+  # Local default mock OpenClaw (kept for rollback and local dry-run).
   openclaw:
     build:
       context: ./mock-openclaw
@@ -55,6 +52,15 @@ services:
       - .env
     environment:
       - ITEMS_SNAPSHOT_PATH=/app/data/items_snapshot.json
+      - AUTOREPLY_STATE_FILE=/app/data/autoreply-state.json
+      - AUTOREPLY_RUNTIME_STATE_FILE=/app/data/autoreply-runtime-state.json
+      - BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN}
+      - OPENCLAW_RUNTIME_MODE=${OPENCLAW_RUNTIME_MODE}
+      - OPENCLAW_CHAT_COMPLETIONS_URL=${OPENCLAW_CHAT_COMPLETIONS_URL}
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}
+      - OPENCLAW_MODEL=${OPENCLAW_MODEL}
+      - OPENCLAW_TIMEOUT_SECONDS=${OPENCLAW_TIMEOUT_SECONDS:-20}
+      - HANDOFF_NOTIFY_WEBHOOK_URL=${HANDOFF_NOTIFY_WEBHOOK_URL}
     ports:
       - "127.0.0.1:8787:8787"
     volumes:

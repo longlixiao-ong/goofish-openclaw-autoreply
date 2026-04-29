@@ -1,4 +1,7 @@
-from typing import Any, Optional
+from __future__ import annotations
+
+import json
+from typing import Any
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -7,29 +10,25 @@ app = FastAPI(title="mock-openclaw")
 
 
 class ReplyRequest(BaseModel):
-    cid: Optional[str] = ""
-    toid: Optional[str] = ""
-    message: Optional[str] = ""
-    risk: Optional[str] = ""
-    rule_reply: Optional[str] = ""
-    item_context: Optional[dict[str, Any]] = None
-    item_context_status: Optional[str] = ""
-    item_context_reason: Optional[str] = ""
-    customer_service_policy: Optional[dict[str, Any]] = None
+    cid: str = ""
+    toid: str = ""
+    message: str = ""
+    risk: str = ""
+    rule_reply: str = ""
+    item_context: dict[str, Any] | None = None
+    item_context_status: str = ""
+    item_context_reason: str = ""
+    customer_service_policy: dict[str, Any] | None = None
 
 
-@app.get("/health")
-def health() -> dict:
-    return {"ok": True, "service": "mock-openclaw"}
+class ChatCompletionsRequest(BaseModel):
+    model: str = "openclaw/default"
+    messages: list[dict[str, Any]] = []
+    user: str = ""
 
 
-@app.post("/reply")
-def reply(payload: ReplyRequest) -> dict:
-    message = (payload.message or "").strip()
-    item_context = payload.item_context if isinstance(payload.item_context, dict) else None
-    item_context_available = bool(item_context and item_context.get("available") is True)
-    lowered_message = message.lower()
-
+def make_mock_decision(message: str) -> dict[str, Any]:
+    lowered_message = (message or "").strip().lower()
     handoff_keywords = [
         "退款",
         "售后",
@@ -61,11 +60,11 @@ def reply(payload: ReplyRequest) -> dict:
         "保证",
         "赔偿",
     ]
-
     hit_handoff_keyword = next((kw for kw in handoff_keywords if kw in lowered_message), "")
+
     handoff = bool(hit_handoff_keyword)
     should_send = not handoff
-    reason = f"hit_handoff_keyword:{hit_handoff_keyword}" if handoff else "default_openclaw"
+    reason = f"hit_handoff_keyword:{hit_handoff_keyword}" if handoff else "mock"
 
     if handoff:
         reply_text = ""
@@ -80,51 +79,57 @@ def reply(payload: ReplyRequest) -> dict:
     else:
         reply_text = "价格合适可以拍"
 
-    item_context_status = (payload.item_context_status or "").strip()
-    if not item_context_status:
-        item_context_status = "available" if item_context_available else "missing"
-
-    item_context_reason = (payload.item_context_reason or "").strip()
-
-    if item_context_available:
-        items = item_context.get("items")
-        if not isinstance(items, list):
-            items = []
-        first_item = items[0] if items and isinstance(items[0], dict) else {}
-        item_context_summary = {
-            "item_count": item_context.get("item_count"),
-            "first_item_title": str(first_item.get("title") or ""),
-            "first_item_price": str(first_item.get("price") or ""),
-            "source": str(item_context.get("source") or ""),
-        }
-    else:
-        item_context_summary = {
-            "item_count": 0,
-            "first_item_title": "",
-            "first_item_price": "",
-            "source": "",
-        }
-
     if not reply_text and should_send:
         should_send = False
         reason = "mock_no_valid_reply"
 
     return {
-        "ok": True,
         "reply": reply_text,
         "should_send": should_send,
         "handoff": handoff,
         "reason": reason,
+    }
+
+
+@app.get("/health")
+def health() -> dict[str, Any]:
+    return {"ok": True, "service": "mock-openclaw"}
+
+
+@app.post("/reply")
+def reply(payload: ReplyRequest) -> dict[str, Any]:
+    decision = make_mock_decision(payload.message)
+    return {
+        "ok": True,
         "source": "mock-openclaw",
-        "cid": payload.cid or "",
-        "toid": payload.toid or "",
-        "customer_service_policy_mode": (
-            payload.customer_service_policy.get("mode")
-            if isinstance(payload.customer_service_policy, dict)
-            else ""
-        ),
-        "received_item_context": item_context_available,
-        "item_context_status": item_context_status,
-        "item_context_reason": item_context_reason,
-        "item_context_summary": item_context_summary,
+        "cid": payload.cid,
+        "toid": payload.toid,
+        **decision,
+    }
+
+
+@app.post("/v1/chat/completions")
+def chat_completions(payload: ChatCompletionsRequest) -> dict[str, Any]:
+    user_message = ""
+    for message in payload.messages:
+        if str(message.get("role", "")).lower() != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            user_message = content
+            break
+    decision = make_mock_decision(user_message)
+    content = json.dumps(decision, ensure_ascii=False)
+    return {
+        "id": "mock-chatcmpl-001",
+        "object": "chat.completion",
+        "created": 0,
+        "model": payload.model or "openclaw/default",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
     }

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -71,7 +72,7 @@ def parse_object(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
         return value
     if isinstance(value, str):
-        text = value.strip()
+        text = strip_markdown_json_fence(value)
         if not text:
             return None
         try:
@@ -81,6 +82,22 @@ def parse_object(value: Any) -> dict[str, Any] | None:
         if isinstance(parsed, dict):
             return parsed
     return None
+
+
+def strip_markdown_json_fence(raw: str) -> str:
+    text = raw.strip()
+    if not text:
+        return ""
+    json_prefix = re.match(r"^json\s*\n([\s\S]*)$", text, re.IGNORECASE)
+    if json_prefix and json_prefix.group(1):
+        return json_prefix.group(1).strip()
+    full_fence = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", text, re.IGNORECASE)
+    if full_fence and full_fence.group(1):
+        return full_fence.group(1).strip()
+    first_fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+    if first_fence and first_fence.group(1):
+        return first_fence.group(1).strip()
+    return text
 
 
 def collect_objects(response: Any) -> list[dict[str, Any]]:
@@ -443,6 +460,27 @@ def run_self_check() -> dict[str, Any]:
                 normalized_choices.get("reply") == "在的，喜欢可拍"
                 and normalized_choices.get("should_send") is True
                 and normalized_choices.get("handoff") is False
+            ),
+        }
+    )
+
+    fenced_response = {
+        "choices": [
+            {
+                "message": {
+                    "content": "```json\n{\"reply\":\"在的\",\"should_send\":true,\"handoff\":false,\"reason\":\"mock\"}\n```"
+                }
+            }
+        ]
+    }
+    normalized_fenced = normalize_openclaw_response(fenced_response, mode="openai_chat")
+    checks.append(
+        {
+            "name": "choices_fenced_json_parse",
+            "ok": (
+                normalized_fenced.get("reply") == "在的"
+                and normalized_fenced.get("should_send") is True
+                and normalized_fenced.get("handoff") is False
             ),
         }
     )
