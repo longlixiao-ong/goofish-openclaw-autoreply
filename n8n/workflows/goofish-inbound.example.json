@@ -247,6 +247,19 @@
       }
     },
     {
+      "id": "OpenClawContext",
+      "name": "保留 OpenClaw 请求上下文",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        140,
+        360
+      ],
+      "parameters": {
+        "jsCode": "return items.map((item) => ({\n  json: {\n    ...item.json,\n    openclaw_context: JSON.parse(JSON.stringify(item.json || {})),\n  },\n}));"
+      }
+    },
+    {
       "id": "OpenClawRequest",
       "name": "OpenClaw HTTP 请求",
       "type": "n8n-nodes-base.httpRequest",
@@ -261,6 +274,19 @@
         "sendBody": true,
         "contentType": "json",
         "jsonBody": "={\"cid\": $json.cid, \"toid\": $json.send_user_id, \"message\": $json.send_message, \"risk\": $json.risk, \"rule_reply\": $json.rule_reply}"
+      }
+    },
+    {
+      "id": "NormalizeOpenClawReply",
+      "name": "归一化 OpenClaw 回复",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        380,
+        360
+      ],
+      "parameters": {
+        "jsCode": "const contextItems = $(\"保留 OpenClaw 请求上下文\").all();\n\nconst pickText = (value) => {\n  if (typeof value === 'string' && value.trim()) return value.trim();\n  return '';\n};\n\nreturn items.map((item, index) => {\n  const response = item.json || {};\n  const contextWrapper = (contextItems[index] && contextItems[index].json) || {};\n  const context = contextWrapper.openclaw_context || contextWrapper || {};\n\n  const candidates = [\n    ['reply', response.reply],\n    ['text', response.text],\n    ['message', response.message],\n    ['content', response.content],\n    ['data.reply', response.data?.reply],\n    ['data.text', response.data?.text],\n    ['data.message', response.data?.message],\n    ['data.content', response.data?.content],\n    ['choices[0].message.content', response.choices?.[0]?.message?.content],\n    ['choices[0].text', response.choices?.[0]?.text],\n  ];\n\n  let openclawReply = '';\n  let source = 'rule_reply_fallback';\n  for (const [name, value] of candidates) {\n    const text = pickText(value);\n    if (text) {\n      openclawReply = text;\n      source = name;\n      break;\n    }\n  }\n\n  const fallbackRuleReply = pickText(context.rule_reply);\n  const reply = openclawReply || fallbackRuleReply;\n\n  return {\n    json: {\n      ...context,\n      cid: context.cid,\n      send_user_id: context.send_user_id,\n      send_message: context.send_message,\n      risk: context.risk,\n      risk_reason: context.risk_reason,\n      rule_reply: context.rule_reply,\n      cooldown_seconds: context.cooldown_seconds,\n      max_reply_chars: context.max_reply_chars,\n      reply,\n      openclaw_reply: openclawReply,\n      openclaw_response: response,\n      openclaw_reply_source: source,\n    },\n  };\n});"
       }
     },
     {
@@ -461,6 +487,17 @@
       "main": [
         [
           {
+            "node": "保留 OpenClaw 请求上下文",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "保留 OpenClaw 请求上下文": {
+      "main": [
+        [
+          {
             "node": "OpenClaw HTTP 请求",
             "type": "main",
             "index": 0
@@ -469,6 +506,17 @@
       ]
     },
     "OpenClaw HTTP 请求": {
+      "main": [
+        [
+          {
+            "node": "归一化 OpenClaw 回复",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "归一化 OpenClaw 回复": {
       "main": [
         [
           {
