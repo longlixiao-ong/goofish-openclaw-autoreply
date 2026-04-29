@@ -188,7 +188,7 @@
     },
     {
       "id": "ClassifyRisk",
-      "name": "风险分类",
+      "name": "转人工门控分类",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
@@ -196,12 +196,12 @@
         280
       ],
       "parameters": {
-        "jsCode": "// 可直接复用 n8n/snippets/classifyRisk.js\nconst text = String($json.send_message || '');\nconst high = ['退款','投诉','售后','举报','假货','骗子','微信','QQ','支付宝','银行卡','线下','转账','私聊','加我'];\nconst low = ['还在吗','在吗','包邮吗','今天能发吗','能便宜吗','最低多少','小刀'];\nlet risk = 'medium';\nlet reason = 'default_medium';\nconst highHit = high.find((k) => text.includes(k));\nif (highHit) { risk = 'high'; reason = `hit_high_keyword:${highHit}`; }\nelse {\n  const lowHit = low.find((k) => text.includes(k));\n  if (lowHit) { risk = 'low'; reason = `hit_low_keyword:${lowHit}`; }\n}\nreturn [{ json: { ...$json, risk, risk_reason: reason } }];"
+        "jsCode": "const text = String($json.send_message ?? '').trim();\nconst handoffKeywords = [\n  '退款',\n  '售后',\n  '投诉',\n  '举报',\n  '假货',\n  '法律',\n  '起诉',\n  '律师',\n  '辱骂',\n  '威胁',\n  '线下交易',\n  '线下',\n  '微信',\n  'QQ',\n  'qq',\n  '支付宝',\n  '银行卡',\n  '转账',\n  '私聊',\n  '加我',\n  '地址纠纷',\n  '订单异常',\n  '付款异常',\n  '支付异常',\n  '发货纠纷',\n  '绕开平台',\n  '平台外交易',\n  '承诺',\n  '保证',\n  '赔偿',\n];\n\nconst hit = handoffKeywords.find((keyword) => text.includes(keyword));\nconst handoff = Boolean(hit);\nconst handoffReason = hit ? `hit_handoff_keyword:${hit}` : '';\nconst routeReason = handoff ? 'handoff_gate_keyword' : 'default_openclaw';\nconst risk = handoff ? 'high' : 'normal';\nconst riskReason = handoff ? handoffReason : 'default_openclaw';\n\nreturn [{\n  json: {\n    ...$json,\n    handoff,\n    handoff_reason: handoffReason,\n    route_reason: routeReason,\n    risk,\n    risk_reason: riskReason,\n    should_send: !handoff,\n  },\n}];"
       }
     },
     {
       "id": "RiskRoute",
-      "name": "IF 高风险",
+      "name": "IF 命中转人工",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
@@ -210,11 +210,11 @@
       ],
       "parameters": {
         "conditions": {
-          "string": [
+          "boolean": [
             {
-              "value1": "={{$json.risk}}",
+              "value1": "={{ [true, \"true\", 1, \"1\"].includes($json.handoff) }}",
               "operation": "equal",
-              "value2": "high"
+              "value2": true
             }
           ]
         }
@@ -222,7 +222,7 @@
     },
     {
       "id": "HighRiskStop",
-      "name": "高风险转人工",
+      "name": "转人工门控结束",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
@@ -230,12 +230,12 @@
         160
       ],
       "parameters": {
-        "jsCode": "return [{ json: { ...$json, send: false, handoff: true, reason: 'high_risk' } }];"
+        "jsCode": "const toBool = (value) => [true, 'true', 1, '1'].includes(value);\nreturn [{\n  json: {\n    ok: true,\n    send: false,\n    handoff: true,\n    handoff_reason: String($json.handoff_reason || 'handoff_gate_keyword'),\n    route_reason: String($json.route_reason || 'handoff_gate_keyword'),\n    reason: 'handoff_gate',\n    dry_run: toBool($json.dry_run),\n    cid: $json.cid ?? '',\n    send_user_id: $json.send_user_id ?? '',\n    send_message: $json.send_message ?? '',\n    risk: $json.risk ?? 'high',\n    risk_reason: $json.risk_reason ?? String($json.handoff_reason || 'handoff_gate_keyword'),\n    item_context_status: 'skipped_handoff',\n    item_context_reason: 'handoff_before_openclaw',\n    openclaw_response: null,\n    should_send: false,\n    final_reply: '',\n  },\n}];"
       }
     },
     {
       "id": "LowRiskReply",
-      "name": "低风险规则回复",
+      "name": "默认进入 OpenClaw",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
@@ -243,7 +243,7 @@
         360
       ],
       "parameters": {
-        "jsCode": "// 可直接复用 n8n/snippets/lowRiskReplies.js\nconst text = String($json.send_message || '').trim();\nlet rule_reply = '';\nif (/还在吗|在吗/.test(text)) rule_reply = '在的，喜欢可拍';\nelse if (/包邮吗/.test(text)) rule_reply = '默认不包，合适可以小刀';\nelse if (/今天能发吗/.test(text)) rule_reply = '今天拍下可以尽快发';\nelse if (/能便宜吗|小刀/.test(text)) rule_reply = '可以小刀，你出个合适价';\nelse if (/最低多少/.test(text)) rule_reply = '价格比较实，合适可拍';\nreturn [{ json: { ...$json, rule_reply } }];"
+        "jsCode": "return items.map((item) => ({\n  json: {\n    ...item.json,\n    handoff: false,\n    handoff_reason: '',\n    route_reason: String(item.json.route_reason || 'default_openclaw'),\n    should_send: true,\n    rule_reply: '',\n  },\n}));"
       }
     },
     {
@@ -271,7 +271,8 @@
       "parameters": {
         "method": "GET",
         "url": "http://goofish-bridge:8787/items/snapshot"
-      }
+      },
+      "continueOnFail": true
     },
     {
       "id": "MergeItemContext",
@@ -283,7 +284,7 @@
         360
       ],
       "parameters": {
-        "jsCode": "const sourceItems = $(\"保留商品上下文请求原始 payload\").all();\n\nreturn items.map((item, index) => {\n  const snapshot = item.json || {};\n  const sourceWrapper = (sourceItems[index] && sourceItems[index].json) || {};\n  const original = sourceWrapper.item_context_original || sourceWrapper || {};\n\n  let item_context = null;\n  let item_context_status = 'missing';\n  let item_context_reason = String(snapshot.reason || 'snapshot_unavailable');\n\n  if (snapshot.ok === true) {\n    item_context = {\n      available: true,\n      source: 'items_snapshot',\n      item_count: Number(snapshot.item_count ?? 0),\n      items: Array.isArray(snapshot.items) ? snapshot.items : [],\n      section_counts: snapshot.section_counts || {},\n      metadata: snapshot.metadata || {},\n    };\n    item_context_status = 'available';\n    item_context_reason = '';\n  }\n\n  return {\n    json: {\n      ...original,\n      cid: original.cid,\n      send_user_id: original.send_user_id,\n      send_message: original.send_message,\n      content_type: original.content_type,\n      dry_run: original.dry_run,\n      risk: original.risk,\n      risk_reason: original.risk_reason,\n      rule_reply: original.rule_reply,\n      cooldown_seconds: original.cooldown_seconds,\n      max_reply_chars: original.max_reply_chars,\n      item_context,\n      item_context_status,\n      item_context_reason,\n    },\n  };\n});"
+        "jsCode": "const sourceItems = $(\"保留商品上下文请求原始 payload\").all();\n\nconst pickText = (value) => {\n  if (typeof value === 'string' && value.trim()) return value.trim();\n  return '';\n};\n\nreturn items.map((item, index) => {\n  const snapshot = item.json || {};\n  const sourceWrapper = (sourceItems[index] && sourceItems[index].json) || {};\n  const original = sourceWrapper.item_context_original || sourceWrapper || {};\n\n  let item_context = null;\n  let item_context_status = 'missing';\n  let item_context_reason = 'snapshot_unavailable';\n\n  if (snapshot.ok === true) {\n    item_context = {\n      available: true,\n      source: 'items_snapshot',\n      item_count: Number(snapshot.item_count ?? 0),\n      items: Array.isArray(snapshot.items) ? snapshot.items : [],\n      section_counts: snapshot.section_counts || {},\n      metadata: snapshot.metadata || {},\n    };\n    item_context_status = 'available';\n    item_context_reason = '';\n  } else if (pickText(snapshot.reason)) {\n    item_context_status = 'missing';\n    item_context_reason = pickText(snapshot.reason);\n  } else if (pickText(snapshot.error?.message) || pickText(snapshot.error)) {\n    item_context_status = 'error';\n    item_context_reason = pickText(snapshot.error?.message) || pickText(snapshot.error);\n  } else if (pickText(snapshot.message)) {\n    item_context_status = 'error';\n    item_context_reason = pickText(snapshot.message);\n  }\n\n  return {\n    json: {\n      ...original,\n      cid: original.cid,\n      send_user_id: original.send_user_id,\n      send_message: original.send_message,\n      content_type: original.content_type,\n      dry_run: original.dry_run,\n      risk: original.risk,\n      risk_reason: original.risk_reason,\n      handoff: original.handoff,\n      handoff_reason: original.handoff_reason,\n      route_reason: original.route_reason,\n      should_send: original.should_send,\n      cooldown_seconds: original.cooldown_seconds,\n      max_reply_chars: original.max_reply_chars,\n      item_context,\n      item_context_status,\n      item_context_reason,\n    },\n  };\n});"
       }
     },
     {
@@ -313,8 +314,9 @@
         "url": "={{$env.OPENCLAW_REPLY_URL || 'http://openclaw:18789/reply'}}",
         "sendBody": true,
         "contentType": "json",
-        "jsonBody": "={\"cid\": $json.cid, \"toid\": $json.send_user_id, \"message\": $json.send_message, \"risk\": $json.risk, \"rule_reply\": $json.rule_reply, \"item_context\": $json.item_context, \"item_context_status\": $json.item_context_status, \"item_context_reason\": $json.item_context_reason}"
-      }
+        "jsonBody": "={\"cid\": $json.cid, \"toid\": $json.send_user_id, \"message\": $json.send_message, \"risk\": $json.risk, \"risk_reason\": $json.risk_reason, \"route_reason\": $json.route_reason, \"item_context\": $json.item_context, \"item_context_status\": $json.item_context_status, \"item_context_reason\": $json.item_context_reason, \"customer_service_policy\": { \"mode\": \"handoff_gate\", \"default_action\": \"allow_openclaw_autoreply\", \"handoff_only\": true, \"handoff_triggers\": [\"refund_or_after_sale\",\"complaint_or_report\",\"counterfeit_or_legal_risk\",\"abuse_or_threat\",\"off_platform_or_external_contact\",\"address_or_order_or_payment_or_shipping_dispute\",\"promise_requires_manual_confirmation\"], \"send_guardrails\": { \"must_block_when\": [\"handoff_true\",\"should_send_false\",\"empty_reply\",\"system_exception\"], \"send_via_bridge_only\": true } } }"
+      },
+      "continueOnFail": true
     },
     {
       "id": "NormalizeOpenClawReply",
@@ -326,7 +328,7 @@
         360
       ],
       "parameters": {
-        "jsCode": "const contextItems = $(\"保留 OpenClaw 请求上下文\").all();\n\nconst pickText = (value) => {\n  if (typeof value === 'string' && value.trim()) return value.trim();\n  return '';\n};\n\nreturn items.map((item, index) => {\n  const response = item.json || {};\n  const contextWrapper = (contextItems[index] && contextItems[index].json) || {};\n  const context = contextWrapper.openclaw_context || contextWrapper || {};\n\n  const candidates = [\n    ['reply', response.reply],\n    ['text', response.text],\n    ['message', response.message],\n    ['content', response.content],\n    ['data.reply', response.data?.reply],\n    ['data.text', response.data?.text],\n    ['data.message', response.data?.message],\n    ['data.content', response.data?.content],\n    ['choices[0].message.content', response.choices?.[0]?.message?.content],\n    ['choices[0].text', response.choices?.[0]?.text],\n  ];\n\n  let openclawReply = '';\n  let source = 'rule_reply_fallback';\n  for (const [name, value] of candidates) {\n    const text = pickText(value);\n    if (text) {\n      openclawReply = text;\n      source = name;\n      break;\n    }\n  }\n\n  const fallbackRuleReply = pickText(context.rule_reply);\n  const reply = openclawReply || fallbackRuleReply;\n\n  return {\n    json: {\n      ...context,\n      cid: context.cid,\n      send_user_id: context.send_user_id,\n      send_message: context.send_message,\n      risk: context.risk,\n      risk_reason: context.risk_reason,\n      rule_reply: context.rule_reply,\n      cooldown_seconds: context.cooldown_seconds,\n      max_reply_chars: context.max_reply_chars,\n      reply,\n      openclaw_reply: openclawReply,\n      openclaw_response: response,\n      openclaw_reply_source: source,\n    },\n  };\n});"
+        "jsCode": "const contextItems = $(\"保留 OpenClaw 请求上下文\").all();\n\nconst pickText = (value) => {\n  if (typeof value === 'string' && value.trim()) return value.trim();\n  return '';\n};\n\nconst parseBool = (value) => {\n  if (typeof value === 'boolean') return value;\n  if (typeof value === 'number') return value !== 0;\n  if (typeof value === 'string') {\n    const lower = value.trim().toLowerCase();\n    if (['true', '1', 'yes', 'y'].includes(lower)) return true;\n    if (['false', '0', 'no', 'n'].includes(lower)) return false;\n  }\n  return null;\n};\n\nreturn items.map((item, index) => {\n  const response = item.json || {};\n  const contextWrapper = (contextItems[index] && contextItems[index].json) || {};\n  const context = contextWrapper.openclaw_context || contextWrapper || {};\n\n  const candidates = [\n    ['reply', response.reply],\n    ['text', response.text],\n    ['message', response.message],\n    ['content', response.content],\n    ['data.reply', response.data?.reply],\n    ['data.text', response.data?.text],\n    ['data.message', response.data?.message],\n    ['data.content', response.data?.content],\n    ['choices[0].message.content', response.choices?.[0]?.message?.content],\n    ['choices[0].text', response.choices?.[0]?.text],\n  ];\n\n  let openclawReply = '';\n  let source = 'none';\n  for (const [name, value] of candidates) {\n    const text = pickText(value);\n    if (text) {\n      openclawReply = text;\n      source = name;\n      break;\n    }\n  }\n\n  const handoffRaw = parseBool(response.handoff);\n  const nestedHandoffRaw = parseBool(response.data?.handoff);\n  const handoff = handoffRaw ?? nestedHandoffRaw ?? false;\n\n  const shouldSendRaw = parseBool(response.should_send);\n  const nestedShouldSendRaw = parseBool(response.data?.should_send);\n  let shouldSend = shouldSendRaw ?? nestedShouldSendRaw;\n  if (shouldSend === null) shouldSend = true;\n\n  const openclawReason =\n    pickText(response.reason) ||\n    pickText(response.data?.reason) ||\n    pickText(response.handoff_reason) ||\n    pickText(response.data?.handoff_reason);\n\n  const openclawError =\n    pickText(response.error?.message) ||\n    pickText(response.error) ||\n    pickText(response.data?.error?.message) ||\n    pickText(response.data?.error);\n\n  return {\n    json: {\n      ...context,\n      cid: context.cid,\n      send_user_id: context.send_user_id,\n      send_message: context.send_message,\n      risk: context.risk,\n      risk_reason: context.risk_reason,\n      route_reason: context.route_reason,\n      handoff: handoff,\n      handoff_reason: handoff ? (openclawReason || String(context.handoff_reason || 'openclaw_handoff')) : String(context.handoff_reason || ''),\n      should_send: shouldSend,\n      reply: openclawReply,\n      openclaw_reply: openclawReply,\n      openclaw_response: response,\n      openclaw_reply_source: source,\n      openclaw_reason: openclawReason,\n      openclaw_error: openclawError,\n      item_context_status: context.item_context_status,\n      item_context_reason: context.item_context_reason,\n      cooldown_seconds: context.cooldown_seconds,\n      max_reply_chars: context.max_reply_chars,\n    },\n  };\n});"
       }
     },
     {
@@ -339,7 +341,7 @@
         360
       ],
       "parameters": {
-        "jsCode": "// 可直接复用 n8n/snippets/sanitizeReply.js\nconst maxReplyChars = Number($json.max_reply_chars || 80);\nconst blocked = /(微信|QQ|支付宝|银行卡|线下|转账|私聊|加我)/i;\nlet text = String($json.reply || $json.rule_reply || '').replace(/<think>[\\s\\S]*?<\\/think>/gi, ' ');\ntext = text.replace(/```(?:thinking|reasoning|analysis)[\\s\\S]*?```/gi, ' ');\nconst markers = ['最终回复：','最终回复:','买家可见回复：','买家可见回复:','回复：','回复:'];\nfor (const marker of markers) {\n  const idx = text.lastIndexOf(marker);\n  if (idx >= 0) text = text.slice(idx + marker.length);\n}\ntext = text.split(/\\r?\\n/)\n  .map((line) => line.replace(/^\\s*(?:[-*+]|#{1,6}|>|\\d+[.)])\\s*/, '').trim())\n  .filter((line) => line && !/^(思考|分析|推理|判断|策略|步骤|理由|reasoning|analysis)/i.test(line))\n  .join(' ')\n  .replace(/\\s+/g, ' ')\n  .trim();\nif (blocked.test(text)) text = '平台内沟通就行，合适可拍';\ntext = text.slice(0, maxReplyChars);\nreturn [{ json: { ...$json, sanitized_reply: text } }];"
+        "jsCode": "const maxReplyChars = Number($json.max_reply_chars || 80);\nconst blocked = /(微信|QQ|支付宝|银行卡|线下|转账|私聊|加我)/i;\nlet text = String($json.reply || '').replace(/<think>[\\s\\S]*?<\\/think>/gi, ' ');\ntext = text.replace(/```(?:thinking|reasoning|analysis)[\\s\\S]*?```/gi, ' ');\nconst markers = ['最终回复：','最终回复:','买家可见回复：','买家可见回复:','回复：','回复:'];\nfor (const marker of markers) {\n  const idx = text.lastIndexOf(marker);\n  if (idx >= 0) text = text.slice(idx + marker.length);\n}\ntext = text.split(/\\r?\\n/)\n  .map((line) => line.replace(/^\\s*(?:[-*+]|#{1,6}|>|\\d+[.)])\\s*/, '').trim())\n  .filter((line) => line && !/^(思考|分析|推理|判断|策略|步骤|理由|reasoning|analysis)/i.test(line))\n  .join(' ')\n  .replace(/\\s+/g, ' ')\n  .trim();\nif (blocked.test(text)) text = '平台内沟通就行，合适可拍';\ntext = text.slice(0, maxReplyChars);\nreturn [{ json: { ...$json, sanitized_reply: text } }];"
       }
     },
     {
@@ -386,7 +388,7 @@
         200
       ],
       "parameters": {
-        "jsCode": "return [{\n  json: {\n    ok: true,\n    send: false,\n    dry_run: true,\n    reason: 'dry_run',\n    cid: $json.cid,\n    send_user_id: $json.send_user_id,\n    send_message: $json.send_message,\n    risk: $json.risk,\n    risk_reason: $json.risk_reason,\n    rule_reply: $json.rule_reply,\n    reply: $json.reply,\n    sanitized_reply: $json.sanitized_reply,\n    final_reply: $json.final_reply,\n    openclaw_reply_source: $json.openclaw_reply_source,\n  },\n}];"
+        "jsCode": "const toTrue = (value) => [true, 'true', 1, '1'].includes(value);\n\nreturn [{\n  json: {\n    ok: true,\n    send: false,\n    dry_run: true,\n    reason: 'dry_run',\n    cid: $json.cid ?? '',\n    send_user_id: $json.send_user_id ?? '',\n    send_message: $json.send_message ?? '',\n    risk: $json.risk ?? '',\n    risk_reason: $json.risk_reason ?? '',\n    handoff: toTrue($json.handoff),\n    handoff_reason: String($json.handoff_reason || ''),\n    route_reason: String($json.route_reason || ''),\n    item_context_status: String($json.item_context_status || ''),\n    item_context_reason: String($json.item_context_reason || ''),\n    openclaw_response: $json.openclaw_response ?? null,\n    should_send: toTrue($json.should_send),\n    reply: String($json.reply || ''),\n    sanitized_reply: String($json.sanitized_reply || ''),\n    final_reply: String($json.final_reply || ''),\n    openclaw_reply_source: String($json.openclaw_reply_source || ''),\n    openclaw_reason: String($json.openclaw_reason || ''),\n    openclaw_error: String($json.openclaw_error || ''),\n  },\n}];"
       }
     },
     {
@@ -404,6 +406,53 @@
         "sendBody": true,
         "contentType": "json",
         "jsonBody": "={{ { \"cid\": $json.cid, \"toid\": $json.send_user_id, \"text\": $json.final_reply } }}"
+      }
+    },
+    {
+      "id": "SendGateDecision",
+      "name": "发送门控决策",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        360
+      ],
+      "parameters": {
+        "jsCode": "const toTrue = (value) => [true, 'true', 1, '1'].includes(value);\nconst toFalse = (value) => [false, 'false', 0, '0'].includes(value);\n\nconst finalReply = String($json.final_reply || '').trim();\nconst openclawError = String($json.openclaw_error || '').trim();\nconst openclawReason = String($json.openclaw_reason || '').trim();\n\nlet handoff = toTrue($json.handoff);\nlet handoffReason = String($json.handoff_reason || '').trim();\nlet shouldSend = !toFalse($json.should_send);\nlet routeReason = String($json.route_reason || 'default_openclaw').trim() || 'default_openclaw';\n\nif (openclawError) {\n  handoff = true;\n  shouldSend = false;\n  routeReason = 'system_exception';\n  if (!handoffReason) {\n    handoffReason = `openclaw_error:${openclawError.slice(0, 160)}`;\n  }\n} else if (handoff) {\n  shouldSend = false;\n  routeReason = 'openclaw_handoff';\n  if (!handoffReason) {\n    handoffReason = openclawReason || 'openclaw_requested_handoff';\n  }\n} else if (!shouldSend) {\n  routeReason = 'openclaw_should_send_false';\n  if (!handoffReason) {\n    handoffReason = openclawReason || 'openclaw_blocked_send';\n  }\n} else if (!finalReply) {\n  handoff = true;\n  shouldSend = false;\n  routeReason = 'openclaw_no_valid_reply';\n  if (!handoffReason) {\n    handoffReason = 'openclaw_no_valid_reply';\n  }\n}\n\nconst reason = shouldSend ? 'ready_to_send' : (routeReason || 'blocked');\n\nreturn [{\n  json: {\n    ...$json,\n    send: shouldSend,\n    should_send: shouldSend,\n    handoff,\n    handoff_reason: handoffReason,\n    route_reason: routeReason,\n    reason,\n    final_reply: finalReply,\n  },\n}];"
+      }
+    },
+    {
+      "id": "SendAllowedIf",
+      "name": "IF 允许发送",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        360
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ [true, \"true\", 1, \"1\"].includes($json.send) }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "NotSendEnd",
+      "name": "不发送结束",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1240,
+        200
+      ],
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    ok: true,\n    send: false,\n    reason: String($json.reason || $json.route_reason || 'blocked'),\n    cid: $json.cid ?? '',\n    send_user_id: $json.send_user_id ?? '',\n    send_message: $json.send_message ?? '',\n    handoff: [true, 'true', 1, '1'].includes($json.handoff),\n    handoff_reason: $json.handoff_reason || '',\n    route_reason: $json.route_reason || '',\n    item_context_status: $json.item_context_status || '',\n    item_context_reason: $json.item_context_reason || '',\n    openclaw_response: $json.openclaw_response ?? null,\n    should_send: [true, 'true', 1, '1'].includes($json.should_send),\n    final_reply: $json.final_reply || '',\n  },\n}];"
       }
     }
   ],
@@ -521,43 +570,43 @@
         ],
         [
           {
-            "node": "风险分类",
+            "node": "转人工门控分类",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "风险分类": {
+    "转人工门控分类": {
       "main": [
         [
           {
-            "node": "IF 高风险",
+            "node": "IF 命中转人工",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "IF 高风险": {
+    "IF 命中转人工": {
       "main": [
         [
           {
-            "node": "高风险转人工",
+            "node": "转人工门控结束",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "低风险规则回复",
+            "node": "默认进入 OpenClaw",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "低风险规则回复": {
+    "默认进入 OpenClaw": {
       "main": [
         [
           {
@@ -649,7 +698,7 @@
       "main": [
         [
           {
-            "node": "IF dry-run 模式",
+            "node": "发送门控决策",
             "type": "main",
             "index": 0
           }
@@ -667,7 +716,36 @@
         ],
         [
           {
+            "node": "IF 允许发送",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "发送门控决策": {
+      "main": [
+        [
+          {
+            "node": "IF dry-run 模式",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF 允许发送": {
+      "main": [
+        [
+          {
             "node": "goofish-bridge /send",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "不发送结束",
             "type": "main",
             "index": 0
           }

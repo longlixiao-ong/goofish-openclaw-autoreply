@@ -1134,7 +1134,16 @@ curl http://localhost:8787/autoreply/status
 ### 20.3 n8n workflow 约束
 
 - 入站消息 workflow：`n8n/workflows/goofish-inbound.example.json`
-- 发送节点必须是 `HTTP Request -> http://goofish-bridge:8787/send`
+- 自动回复路由改为“转人工门控”：
+  - 命中转人工条件：`handoff=true`，不进入 OpenClaw，不进入 `/send`
+  - 未命中转人工条件：默认进入 OpenClaw（不再依赖低风险白名单）
+- OpenClaw 返回协议至少支持：`reply`、`should_send`、`handoff`、`reason`
+- 发送前必须执行 fail-closed 门控：
+  - `handoff=true` 不发送
+  - `should_send=false` 不发送
+  - 无有效 `reply` 不发送
+  - 任意系统异常不发送
+- 发送节点必须是 `HTTP Request -> http://goofish-bridge:8787/send`，不得绕过 bridge 闸门
 - 开关节点必须调用：
   - `POST http://goofish-bridge:8787/autoreply/start`
   - `POST http://goofish-bridge:8787/autoreply/stop`
@@ -1153,6 +1162,20 @@ python -m json.tool n8n/workflows/goofish-inbound.example.json
 - 测试只做编译和 JSON 结构校验。
 - 不运行真实 `goofish message send` 测试。
 - 不运行真实闲鱼发送测试。
+
+### 20.5 dry-run 诊断字段
+
+`dry_run=true` 只观察不发送，返回中应包含：
+
+- `handoff`
+- `handoff_reason`
+- `route_reason`
+- `item_context_status`
+- `item_context_reason`
+- `openclaw_response`
+- `should_send`
+- `final_reply`
+- `send=false`
 
 ## Local smoke test
 

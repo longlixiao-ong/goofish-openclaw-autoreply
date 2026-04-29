@@ -11,10 +11,11 @@ Goofish buyer message
   -> goofish message watch
   -> goofish-watcher.py
   -> n8n webhook
-  -> de-dup / cooldown / risk routing
-  -> OpenClaw Agent
-  -> sanitize reply
-  -> goofish message send
+  -> de-dup / cooldown / handoff gate
+  -> (handoff hit) stop and handoff
+  -> (default) item_context + OpenClaw Agent
+  -> sanitize reply + send gate
+  -> goofish-bridge /send
   -> Goofish buyer
 ```
 
@@ -24,8 +25,9 @@ Goofish buyer message
 Goofish WebSocket
   -> goofish-bridge watch loop
   -> n8n webhook
-  -> OpenClaw Agent
-  -> n8n risk/sanitize/queue
+  -> handoff gate (n8n)
+  -> OpenClaw Agent (default path)
+  -> n8n sanitize + should_send/handoff gate
   -> goofish-bridge /send
   -> Goofish WebSocket
 ```
@@ -33,7 +35,7 @@ Goofish WebSocket
 ## Core boundaries
 
 - `goofish-cli`: login state, IM watch, IM send, item query, media upload, publish, built-in rate limit and circuit breaker.
-- `n8n`: workflow orchestration, state switch, de-dup, cooldown, send queue, risk routing, health checks.
+- `n8n`: workflow orchestration, state switch, de-dup, cooldown, handoff gating, dry-run diagnostics, send decision.
 - `OpenClaw`: model, image understanding, seller persona, bargain strategy, memory and final response decision.
 
 ## Non-goals
