@@ -36,7 +36,7 @@ services:
     env_file:
       - .env
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
     volumes:
       - ./goofish-state:/root/.goofish-cli
       - ./data:/app/data

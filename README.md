@@ -1087,6 +1087,10 @@ goofish message watch
 - `goofish-state` 只挂载在 `goofish-watcher` 和 `goofish-bridge`，n8n 不持有 Cookie。
 - `goofish-bridge` 内部仍调用官方 `goofish-cli`，保留其限流与熔断，不做绕过。
 - `scripts/send_text.py` 保留为本地调试备用脚本，不在正式 n8n 发送链路中使用。
+- `docker-compose.example.yml` 默认仅将 `goofish-bridge` 端口绑定到 localhost（`127.0.0.1:8787:8787`）。
+- n8n 容器内部调用地址不变，仍使用 `http://goofish-bridge:8787`。
+- 不建议把 `goofish-bridge` 直接暴露到公网或局域网。
+- 如必须外部访问，先加认证，或放到受控反向代理后面再暴露。
 
 ### 20.1 Docker Compose 启动步骤
 
