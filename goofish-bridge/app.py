@@ -7,6 +7,8 @@ import logging
 import os
 import re
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,41 @@ SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 APP = FastAPI(title="goofish-bridge", version="1.0.0")
+
+SEND_GUARD_EXIT_CODE = 4
+LAST_SUCCESS_SEND_AT: float | None = None
+LAST_SUCCESS_SEND_LOCK = threading.Lock()
+
+EXTERNAL_CONTACT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("微信", re.compile(r"微信", re.IGNORECASE)),
+    ("QQ", re.compile(r"qq", re.IGNORECASE)),
+    ("支付宝", re.compile(r"支付宝", re.IGNORECASE)),
+    ("银行卡", re.compile(r"银行卡", re.IGNORECASE)),
+    ("转账", re.compile(r"转账", re.IGNORECASE)),
+    ("私聊", re.compile(r"私聊", re.IGNORECASE)),
+    ("加我", re.compile(r"加我", re.IGNORECASE)),
+    ("线下", re.compile(r"线下", re.IGNORECASE)),
+    ("电话", re.compile(r"电话", re.IGNORECASE)),
+    ("手机号", re.compile(r"手机号", re.IGNORECASE)),
+    ("vx", re.compile(r"\bvx\b", re.IGNORECASE)),
+    ("v信", re.compile(r"v信", re.IGNORECASE)),
+    ("wechat", re.compile(r"wechat", re.IGNORECASE)),
+]
+
+ABNORMAL_TEXT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("reasoning_leak", re.compile(r"<\s*/?\s*think\s*>", re.IGNORECASE)),
+    ("reasoning_leak", re.compile(r"\breasoning\b", re.IGNORECASE)),
+    ("reasoning_leak", re.compile(r"\banalysis\b", re.IGNORECASE)),
+    ("reasoning_leak", re.compile(r"思考过程|推理过程|链路推理|内部推理", re.IGNORECASE)),
+    ("error_leak", re.compile(r"traceback", re.IGNORECASE)),
+    ("error_leak", re.compile(r"stack\s*trace", re.IGNORECASE)),
+    ("error_leak", re.compile(r"\bexception\b", re.IGNORECASE)),
+    ("error_leak", re.compile(r"^\s*error[:：]", re.IGNORECASE)),
+    ("error_leak", re.compile(r"^\s*错误[:：]", re.IGNORECASE)),
+    ("error_leak", re.compile(r"undefined|null|nan", re.IGNORECASE)),
+]
+
+PUNCT_OR_SYMBOL_ONLY_PATTERN = re.compile(r"^[\s\W_]+$", re.UNICODE)
 
 
 class SendRequest(BaseModel):
@@ -76,6 +113,93 @@ def env_int(name: str, default_value: int, min_value: int = 1) -> int:
 
 def get_max_reply_chars() -> int:
     return env_int("MAX_REPLY_CHARS", 80, min_value=1)
+
+
+def to_int(value: Any, default_value: int, min_value: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default_value
+    if parsed < min_value:
+        return min_value
+    return parsed
+
+
+def to_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y"}:
+            return True
+        if lowered in {"false", "0", "no", "n"}:
+            return False
+    return default
+
+
+def build_send_error_response(
+    *,
+    status_code: int,
+    reason: str,
+    cid: str,
+    toid: str,
+    exit_code: int,
+    stderr: str,
+    stdout: str = "",
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "ok": False,
+            "sent": False,
+            "reason": reason,
+            "cid": cid,
+            "toid": toid,
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+        },
+    )
+
+
+def detect_external_contact(text: str) -> tuple[bool, str]:
+    for label, pattern in EXTERNAL_CONTACT_PATTERNS:
+        if pattern.search(text):
+            return True, label
+    return False, ""
+
+
+def detect_abnormal_text(text: str) -> tuple[bool, str]:
+    if not text.strip():
+        return True, "empty_text"
+    if PUNCT_OR_SYMBOL_ONLY_PATTERN.fullmatch(text):
+        return True, "punctuation_only"
+    for label, pattern in ABNORMAL_TEXT_PATTERNS:
+        if pattern.search(text):
+            return True, label
+    return False, ""
+
+
+def check_global_send_interval(interval_seconds: int) -> tuple[bool, int]:
+    if interval_seconds <= 0:
+        return False, 0
+    now = time.time()
+    with LAST_SUCCESS_SEND_LOCK:
+        if LAST_SUCCESS_SEND_AT is None:
+            return False, 0
+        elapsed = now - LAST_SUCCESS_SEND_AT
+    if elapsed >= interval_seconds:
+        return False, 0
+    retry_after = max(1, int(interval_seconds - elapsed + 0.999))
+    return True, retry_after
+
+
+def mark_send_success() -> None:
+    global LAST_SUCCESS_SEND_AT
+    with LAST_SUCCESS_SEND_LOCK:
+        LAST_SUCCESS_SEND_AT = time.time()
 
 
 def get_autoreply_state_file() -> Path:
@@ -418,65 +542,88 @@ def send(payload: SendRequest) -> JSONResponse:
     text = payload.text.strip()
 
     if not cid or not toid or not text:
-        return JSONResponse(
+        return build_send_error_response(
             status_code=400,
-            content={
-                "ok": False,
-                "sent": False,
-                "reason": "invalid_request",
-                "cid": cid,
-                "toid": toid,
-                "exit_code": 2,
-                "stdout": "",
-                "stderr": "cid, toid, text are required",
-            },
+            reason="invalid_request",
+            cid=cid,
+            toid=toid,
+            exit_code=2,
+            stderr="cid, toid, text are required",
         )
 
     max_reply_chars = get_max_reply_chars()
     if len(text) > max_reply_chars:
-        return JSONResponse(
+        return build_send_error_response(
             status_code=400,
-            content={
-                "ok": False,
-                "sent": False,
-                "reason": "text_too_long",
-                "cid": cid,
-                "toid": toid,
-                "exit_code": 2,
-                "stdout": "",
-                "stderr": f"text is too long, max={max_reply_chars}",
-            },
+            reason="text_too_long",
+            cid=cid,
+            toid=toid,
+            exit_code=2,
+            stderr=f"text is too long, max={max_reply_chars}",
         )
 
     state = load_autoreply_state()
     if state.get("enabled") is not True:
-        return JSONResponse(
+        return build_send_error_response(
             status_code=409,
-            content={
-                "ok": False,
-                "sent": False,
-                "reason": "autoreply_disabled",
-                "cid": cid,
-                "toid": toid,
-                "exit_code": 3,
-                "stdout": "",
-                "stderr": "autoreply is disabled",
-            },
+            reason="autoreply_disabled",
+            cid=cid,
+            toid=toid,
+            exit_code=3,
+            stderr="autoreply is disabled",
         )
     if state.get("auto_send") is not True:
-        return JSONResponse(
+        return build_send_error_response(
             status_code=409,
-            content={
-                "ok": False,
-                "sent": False,
-                "reason": "auto_send_disabled",
-                "cid": cid,
-                "toid": toid,
-                "exit_code": 3,
-                "stdout": "",
-                "stderr": "auto_send is disabled",
-            },
+            reason="auto_send_disabled",
+            cid=cid,
+            toid=toid,
+            exit_code=3,
+            stderr="auto_send is disabled",
         )
+
+    safe_mode = to_bool(state.get("safe_mode"), default=True)
+    if safe_mode:
+        has_external_contact, keyword = detect_external_contact(text)
+        if has_external_contact:
+            return build_send_error_response(
+                status_code=400,
+                reason="external_contact_blocked",
+                cid=cid,
+                toid=toid,
+                exit_code=SEND_GUARD_EXIT_CODE,
+                stderr=f"external contact keyword blocked: {keyword}",
+            )
+
+        abnormal, abnormal_type = detect_abnormal_text(text)
+        if abnormal:
+            return build_send_error_response(
+                status_code=400,
+                reason="abnormal_text_blocked",
+                cid=cid,
+                toid=toid,
+                exit_code=SEND_GUARD_EXIT_CODE,
+                stderr=f"abnormal text blocked: {abnormal_type}",
+            )
+
+        interval_seconds = to_int(
+            state.get("global_send_interval_seconds"),
+            default_value=to_int(DEFAULT_AUTOREPLY_STATE.get("global_send_interval_seconds"), 30, min_value=0),
+            min_value=0,
+        )
+        rate_limited, retry_after_seconds = check_global_send_interval(interval_seconds)
+        if rate_limited:
+            return build_send_error_response(
+                status_code=429,
+                reason="global_rate_limited",
+                cid=cid,
+                toid=toid,
+                exit_code=SEND_GUARD_EXIT_CODE,
+                stderr=(
+                    "global send interval active, retry after "
+                    f"{retry_after_seconds}s (interval={interval_seconds}s)"
+                ),
+            )
 
     timeout_seconds = env_int("GOOFISH_SEND_TIMEOUT_SECONDS", 30, min_value=1)
     result = run_goofish_command(
@@ -494,6 +641,8 @@ def send(payload: SendRequest) -> JSONResponse:
         "stderr": result["stderr"],
     }
     if result["ok"]:
+        if safe_mode:
+            mark_send_success()
         return JSONResponse(status_code=200, content=response)
     return JSONResponse(status_code=500, content=response)
 
