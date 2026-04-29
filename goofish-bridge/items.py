@@ -15,6 +15,14 @@ PERSONAL_PAGE_URL = f"{GOOFISH_BASE_URL}/personal"
 DEFAULT_SCROLL_DELTA = 900
 DEFAULT_STALE_ROUNDS = 2
 
+
+class ItemCollectionError(RuntimeError):
+    def __init__(self, reason: str, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+        self.details = details or {}
+
 SECTION_DEFINITIONS: dict[str, dict[str, Any]] = {
     "selling": {
         "key": "selling",
@@ -224,7 +232,11 @@ def _click_section_tab(page: Any, section: dict[str, Any]) -> None:
                 return
         except Exception:
             continue
-    raise RuntimeError(f'未找到“{section["label"]}”标签，无法采集该状态商品。')
+    raise ItemCollectionError(
+        "section_tab_not_found",
+        f'未找到“{section["label"]}”标签，无法采集该状态商品。',
+        details={"section": section.get("key"), "label": section.get("label")},
+    )
 
 
 def _collect_items_for_section(
@@ -285,16 +297,48 @@ def collect_current_account_items(
 ) -> dict[str, Any]:
     cookie_string = (cookie_string or "").strip()
     if not cookie_string:
-        raise ValueError("cookie_string is required")
+        raise ItemCollectionError("missing_cookie", "missing Goofish cookie string")
 
-    section_defs = _resolve_sections(sections)
+    try:
+        section_defs = _resolve_sections(sections)
+    except ValueError as exc:
+        raise ItemCollectionError(
+            "invalid_sections",
+            str(exc),
+            details={"sections": sections or []},
+        ) from exc
+
     section_keys = [section["key"] for section in section_defs]
     section_counts: dict[str, int] = {"selling": 0, "offline": 0, "draft": 0}
 
-    from playwright.sync_api import sync_playwright
+    try:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import sync_playwright
+    except ModuleNotFoundError as exc:
+        raise ItemCollectionError(
+            "playwright_not_installed",
+            "playwright is not installed in runtime",
+        ) from exc
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=headless)
+        try:
+            browser = playwright.chromium.launch(headless=headless)
+        except PlaywrightError as exc:
+            message = str(exc)
+            if "Executable doesn't exist" in message:
+                raise ItemCollectionError(
+                    "playwright_browser_missing",
+                    "playwright chromium browser is missing",
+                    details={"action": "python -m playwright install chromium"},
+                ) from exc
+            if "Host system is missing dependencies" in message:
+                raise ItemCollectionError(
+                    "playwright_runtime_dependency_missing",
+                    "host system dependencies for playwright are missing",
+                    details={"action": "python -m playwright install --with-deps chromium"},
+                ) from exc
+            raise ItemCollectionError("playwright_launch_failed", message) from exc
+
         try:
             context = browser.new_context()
             context.add_cookies(cookie_string_to_playwright_cookies(cookie_string))
@@ -303,7 +347,10 @@ def collect_current_account_items(
             time.sleep(2.0)
 
             if not _is_logged_in(page):
-                raise RuntimeError("not logged in or invalid cookie for personal page")
+                raise ItemCollectionError(
+                    "not_logged_in",
+                    "not logged in or invalid cookie for personal page",
+                )
 
             account = _extract_account_metadata(page)
             all_items: list[dict[str, Any]] = []
@@ -337,5 +384,12 @@ def collect_current_account_items(
             if output_path:
                 write_snapshot(output_path, payload)
             return payload
+        except ItemCollectionError:
+            raise
+        except PlaywrightError as exc:
+            raise ItemCollectionError(
+                "playwright_runtime_error",
+                str(exc),
+            ) from exc
         finally:
             browser.close()

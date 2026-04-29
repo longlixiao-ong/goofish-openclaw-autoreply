@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
-from items import collect_current_account_items, write_snapshot
+from items import ItemCollectionError, collect_current_account_items, write_snapshot
 
 
 LOGGER = logging.getLogger("goofish-bridge")
@@ -233,14 +233,94 @@ def normalize_snapshot_response(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def snapshot_not_found_response() -> dict[str, Any]:
+def snapshot_not_found_response(snapshot_path: Path) -> dict[str, Any]:
     return {
         "ok": False,
         "reason": "snapshot_not_found",
         "message": "items snapshot not found",
+        "snapshot_path": str(snapshot_path),
         "items": [],
         "item_count": 0,
     }
+
+
+def get_refresh_hint(reason: str) -> str:
+    hints = {
+        "missing_cookie": (
+            "missing login cookie. ensure goofish account is logged in and goofish-state is mounted to "
+            "/root/.goofish-cli in goofish-bridge container."
+        ),
+        "not_logged_in": "cookie exists but account is not logged in on personal page. re-login and refresh again.",
+        "playwright_not_installed": "playwright package missing in runtime. rebuild goofish-bridge image.",
+        "playwright_browser_missing": "playwright chromium missing. rebuild image or run playwright install chromium.",
+        "playwright_runtime_dependency_missing": (
+            "system dependencies for playwright chromium are missing. rebuild image with playwright deps."
+        ),
+        "section_tab_not_found": "requested section tab is not visible on personal page. try default sections first.",
+        "invalid_sections": "unsupported sections. use selling,offline,draft.",
+    }
+    return hints.get(reason, "refresh failed. check goofish-bridge logs for details.")
+
+
+def refresh_items_snapshot_payload(
+    *,
+    snapshot_path: Path,
+    headless: bool,
+    sections: str | None,
+    max_scroll_rounds: int,
+) -> dict[str, Any]:
+    cookie_string = get_cookie_string()
+    if not cookie_string:
+        reason = "missing_cookie"
+        return {
+            "ok": False,
+            "reason": reason,
+            "message": "missing Goofish cookie string",
+            "hint": get_refresh_hint(reason),
+            "snapshot_path": str(snapshot_path),
+            "items": [],
+            "item_count": 0,
+        }
+
+    safe_rounds = max(1, int(max_scroll_rounds))
+    try:
+        payload = collect_current_account_items(
+            cookie_string,
+            output_path=None,
+            headless=headless,
+            sections=parse_sections_param(sections),
+            max_scroll_rounds=safe_rounds,
+        )
+        save_items_snapshot(snapshot_path, payload)
+        result = dict(payload)
+        result["snapshot_path"] = str(snapshot_path)
+        result["refreshed"] = True
+        result["source"] = "live_refresh"
+        result["response_source"] = "live_refresh"
+        return result
+    except ItemCollectionError as exc:
+        return {
+            "ok": False,
+            "reason": exc.reason,
+            "message": exc.message,
+            "hint": get_refresh_hint(exc.reason),
+            "details": exc.details,
+            "snapshot_path": str(snapshot_path),
+            "items": [],
+            "item_count": 0,
+        }
+    except Exception as exc:  # noqa: BLE001
+        message = redact_sensitive(str(exc)).strip() or "item collection failed"
+        reason = "collection_failed"
+        return {
+            "ok": False,
+            "reason": reason,
+            "message": message,
+            "hint": get_refresh_hint(reason),
+            "snapshot_path": str(snapshot_path),
+            "items": [],
+            "item_count": 0,
+        }
 
 
 def parse_sections_param(raw_sections: str | None) -> list[str] | None:
@@ -270,7 +350,7 @@ def items_snapshot() -> JSONResponse:
     snapshot_path = get_snapshot_path()
     payload = load_items_snapshot(snapshot_path)
     if payload is None:
-        return JSONResponse(status_code=200, content=snapshot_not_found_response())
+        return JSONResponse(status_code=200, content=snapshot_not_found_response(snapshot_path))
     return JSONResponse(status_code=200, content=normalize_snapshot_response(payload))
 
 
@@ -286,45 +366,32 @@ def items_selling(
     if not refresh:
         payload = load_items_snapshot(snapshot_path)
         if payload is None:
-            return JSONResponse(status_code=200, content=snapshot_not_found_response())
+            return JSONResponse(status_code=200, content=snapshot_not_found_response(snapshot_path))
         return JSONResponse(status_code=200, content=normalize_snapshot_response(payload))
 
-    cookie_string = get_cookie_string()
-    if not cookie_string:
-        return JSONResponse(
-            status_code=200,
-            content={
-                "ok": False,
-                "reason": "missing_cookie",
-                "message": "missing Goofish cookie string",
-                "items": [],
-                "item_count": 0,
-            },
-        )
+    payload = refresh_items_snapshot_payload(
+        snapshot_path=snapshot_path,
+        headless=headless,
+        sections=sections,
+        max_scroll_rounds=max_scroll_rounds,
+    )
+    return JSONResponse(status_code=200, content=payload)
 
-    safe_rounds = max(1, int(max_scroll_rounds))
-    try:
-        payload = collect_current_account_items(
-            cookie_string,
-            output_path=None,
-            headless=headless,
-            sections=parse_sections_param(sections),
-            max_scroll_rounds=safe_rounds,
-        )
-        save_items_snapshot(snapshot_path, payload)
-        return JSONResponse(status_code=200, content=payload)
-    except Exception as exc:  # noqa: BLE001
-        message = redact_sensitive(str(exc)).strip() or "item collection failed"
-        return JSONResponse(
-            status_code=200,
-            content={
-                "ok": False,
-                "reason": "collection_failed",
-                "message": message,
-                "items": [],
-                "item_count": 0,
-            },
-        )
+
+@APP.post("/items/snapshot/refresh")
+def items_snapshot_refresh(
+    headless: bool = True,
+    sections: str | None = None,
+    max_scroll_rounds: int = 8,
+) -> JSONResponse:
+    snapshot_path = get_snapshot_path()
+    payload = refresh_items_snapshot_payload(
+        snapshot_path=snapshot_path,
+        headless=headless,
+        sections=sections,
+        max_scroll_rounds=max_scroll_rounds,
+    )
+    return JSONResponse(status_code=200, content=payload)
 
 
 @APP.get("/autoreply/status")
