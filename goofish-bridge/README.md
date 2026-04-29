@@ -12,6 +12,9 @@ This service does not bypass goofish-cli limits or platform controls. It only wr
 ```text
 GET  /health
 GET  /status
+GET  /items/snapshot
+GET  /items/selling
+POST /items/snapshot/refresh
 POST /send
 POST /autoreply/start
 POST /autoreply/stop
@@ -25,6 +28,7 @@ GOOFISH_BRIDGE_HOST=0.0.0.0
 GOOFISH_BRIDGE_PORT=8787
 MAX_REPLY_CHARS=80
 AUTOREPLY_STATE_FILE=/app/data/autoreply-state.json
+ITEMS_SNAPSHOT_PATH=/app/data/items_snapshot.json
 GOOFISH_SEND_TIMEOUT_SECONDS=30
 GOOFISH_AUTH_STATUS_TIMEOUT_SECONDS=15
 ```
@@ -55,4 +59,17 @@ Response shape:
   "stdout": "...",
   "stderr": ""
 }
+```
+
+## Read-only item snapshot refresh
+
+```bash
+# refresh from current logged-in account (read-only collection)
+curl "http://localhost:8787/items/selling?refresh=true"
+
+# or explicit refresh endpoint
+curl -X POST "http://localhost:8787/items/snapshot/refresh"
+
+# read current snapshot used by n8n item_context chain
+curl "http://localhost:8787/items/snapshot"
 ```

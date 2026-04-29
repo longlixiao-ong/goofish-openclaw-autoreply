@@ -1159,6 +1159,7 @@ python -m json.tool n8n/workflows/goofish-inbound.example.json
 See `docs/LOCAL_SMOKE_TEST.md`.
 Local smoke test result -> `docs/SMOKE_TEST_RESULT.md`.
 N8N control workflow -> `docs/N8N_CONTROL_WORKFLOW.md`.
+Real item snapshot guide -> `docs/REAL_ITEM_SNAPSHOT.md`.
 
 ### Item context dry-run notes
 
@@ -1170,3 +1171,51 @@ python scripts/write_test_items_snapshot.py
 ```
 
 This script only writes fake test data to `data/items_snapshot.json`, does not read cookies, does not access Xianyu, and does not send messages.
+
+## 21. Real item snapshot refresh (read-only)
+
+目标：把当前账号商品实时采集为 `items_snapshot.json`，供 n8n 自动客服链路读取。
+
+前提：
+
+- `goofish-bridge` 容器已启动。
+- `goofish-state` 已挂载到容器 `/root/.goofish-cli`。
+- 该登录态可访问个人中心页面。
+
+推荐命令（只读采集，不发送消息）：
+
+```powershell
+python scripts/refresh_items_snapshot.py --base-url http://127.0.0.1:8787
+```
+
+若本机 HTTP 请求栈异常（例如 `WinError 10106`）：
+
+```powershell
+python scripts/refresh_items_snapshot.py --via-container
+```
+
+直接接口方式：
+
+```powershell
+curl.exe "http://127.0.0.1:8787/items/selling?refresh=true"
+curl.exe "http://127.0.0.1:8787/items/snapshot"
+```
+
+也可使用显式刷新接口：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8787/items/snapshot/refresh"
+```
+
+说明：
+
+- 快照容器路径：`/app/data/items_snapshot.json`
+- 在本仓库默认映射到主机 `./data/items_snapshot.json`
+- n8n inbound workflow 会通过 `GET http://goofish-bridge:8787/items/snapshot` 读取并传递 `item_context` 给 OpenClaw。
+
+常见错误：
+
+- `missing_cookie`：容器内没有可用登录态。
+- `not_logged_in`：Cookie 存在但个人中心仍未登录。
+- `playwright_browser_missing`：容器缺 Chromium 浏览器（重新 build goofish-bridge）。
+- `playwright_runtime_dependency_missing`：容器缺浏览器系统依赖（重新 build goofish-bridge）。
