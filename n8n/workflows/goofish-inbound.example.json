@@ -28,7 +28,41 @@
         280
       ],
       "parameters": {
-        "jsCode": "// TODO: 使用 data/autoreply-state.json 或外部存储做幂等去重（cid + send_user_id + send_message + timestamp）\nreturn items;"
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nif (!staticData.dedupStore || typeof staticData.dedupStore !== 'object') {\n  staticData.dedupStore = { order: [], map: {} };\n}\nconst dedupStore = staticData.dedupStore;\nif (!Array.isArray(dedupStore.order)) dedupStore.order = [];\nif (!dedupStore.map || typeof dedupStore.map !== 'object') dedupStore.map = {};\n\nconst MAX_DEDUP_KEYS = 500;\n\nreturn items.map((item) => {\n  const cid = String(item.json.cid ?? '').trim();\n  const sendUserId = String(item.json.send_user_id ?? '').trim();\n  const sendMessage = String(item.json.send_message ?? '').trim();\n  const dedupKey = `${cid}::${sendUserId}::${sendMessage}`;\n\n  const isDuplicate = Boolean(dedupStore.map[dedupKey]);\n\n  if (!isDuplicate) {\n    dedupStore.map[dedupKey] = Date.now();\n    dedupStore.order.push(dedupKey);\n\n    while (dedupStore.order.length > MAX_DEDUP_KEYS) {\n      const oldest = dedupStore.order.shift();\n      if (oldest) delete dedupStore.map[oldest];\n    }\n  }\n\n  if (isDuplicate) {\n    return {\n      json: {\n        ...item.json,\n        dedup_key: dedupKey,\n        is_duplicate: true,\n        ok: true,\n        send: false,\n        reason: 'duplicate_message',\n        message: 'duplicate message skipped',\n        cid,\n        send_user_id: sendUserId,\n      },\n    };\n  }\n\n  return {\n    json: {\n      ...item.json,\n      dedup_key: dedupKey,\n      is_duplicate: false,\n    },\n  };\n});"
+      }
+    },
+    {
+      "id": "DedupRoute",
+      "name": "IF 重复消息",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -980,
+        280
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.is_duplicate}}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "DuplicateEnd",
+      "name": "重复消息结束",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -780,
+        120
+      ],
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    ok: true,\n    send: false,\n    reason: 'duplicate_message',\n    message: 'duplicate message skipped',\n    cid: $json.cid ?? '',\n    send_user_id: $json.send_user_id ?? '',\n  },\n}];"
       }
     },
     {
@@ -115,7 +149,41 @@
         280
       ],
       "parameters": {
-        "jsCode": "// TODO: 按 cid 做 cooldown_seconds 检查\nreturn items;"
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nif (!staticData.cooldownStore || typeof staticData.cooldownStore !== 'object') {\n  staticData.cooldownStore = {};\n}\nconst cooldownStore = staticData.cooldownStore;\nconst now = Date.now();\n\nreturn items.map((item) => {\n  const cid = String(item.json.cid ?? '').trim();\n  const cooldownRaw = Number(item.json.cooldown_seconds);\n  const cooldownSeconds = Number.isFinite(cooldownRaw) && cooldownRaw > 0 ? Math.floor(cooldownRaw) : 15;\n  const lastAllowedAt = Number(cooldownStore[cid] ?? 0);\n  const elapsedSeconds = (now - lastAllowedAt) / 1000;\n\n  if (cid && lastAllowedAt > 0 && elapsedSeconds < cooldownSeconds) {\n    const remainingSeconds = Math.max(1, Math.ceil(cooldownSeconds - elapsedSeconds));\n    return {\n      json: {\n        ...item.json,\n        cooldown_active: true,\n        ok: true,\n        send: false,\n        reason: 'cooldown_active',\n        message: 'conversation cooldown active',\n        cid,\n        cooldown_seconds: cooldownSeconds,\n        remaining_seconds: remainingSeconds,\n      },\n    };\n  }\n\n  if (cid) {\n    cooldownStore[cid] = now;\n  }\n\n  return {\n    json: {\n      ...item.json,\n      cooldown_active: false,\n      cooldown_seconds: cooldownSeconds,\n    },\n  };\n});"
+      }
+    },
+    {
+      "id": "CooldownRoute",
+      "name": "IF 会话冷却中",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -540,
+        280
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.cooldown_active}}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "CooldownEnd",
+      "name": "会话冷却结束",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -340,
+        440
+      ],
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    ok: true,\n    send: false,\n    reason: 'cooldown_active',\n    message: 'conversation cooldown active',\n    cid: $json.cid ?? '',\n    cooldown_seconds: Number($json.cooldown_seconds ?? 15),\n    remaining_seconds: Number($json.remaining_seconds ?? 0),\n  },\n}];"
       }
     },
     {
@@ -255,6 +323,24 @@
       "main": [
         [
           {
+            "node": "IF 重复消息",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF 重复消息": {
+      "main": [
+        [
+          {
+            "node": "重复消息结束",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
             "node": "保留原始入站消息",
             "type": "main",
             "index": 0
@@ -315,6 +401,24 @@
     },
     "会话冷却": {
       "main": [
+        [
+          {
+            "node": "IF 会话冷却中",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF 会话冷却中": {
+      "main": [
+        [
+          {
+            "node": "会话冷却结束",
+            "type": "main",
+            "index": 0
+          }
+        ],
         [
           {
             "node": "风险分类",
