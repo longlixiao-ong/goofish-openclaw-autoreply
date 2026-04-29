@@ -19,6 +19,19 @@
       }
     },
     {
+      "id": "InboundNormalize",
+      "name": "入站归一化",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1200,
+        280
+      ],
+      "parameters": {
+        "jsCode": "const isMeaningful = (value) => {\n  if (value === null || value === undefined) return false;\n  if (typeof value === 'string') return value.trim() !== '';\n  return true;\n};\n\nconst pickValue = (...values) => {\n  for (const value of values) {\n    if (isMeaningful(value)) return value;\n  }\n  return undefined;\n};\n\nconst parseJsonObject = (raw) => {\n  if (typeof raw !== 'string') return null;\n  const text = raw.trim();\n  if (!text) return null;\n  try {\n    const parsed = JSON.parse(text);\n    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {\n      return parsed;\n    }\n  } catch {\n    return null;\n  }\n  return null;\n};\n\nconst parseTruthyDryRun = (value) => {\n  if (value === true || value === 1) return true;\n  if (typeof value === 'string') {\n    const lowered = value.trim().toLowerCase();\n    return lowered === 'true' || lowered === '1';\n  }\n  return false;\n};\n\nconst toOptionalInt = (value) => {\n  if (!isMeaningful(value)) return null;\n  const num = Number(value);\n  if (!Number.isFinite(num)) return null;\n  return Math.floor(num);\n};\n\nconst toOptionalString = (value) => {\n  if (!isMeaningful(value)) return '';\n  return String(value).trim();\n};\n\nreturn items.map((item) => {\n  const root = (item && item.json && typeof item.json === 'object') ? item.json : {};\n\n  let payload = root;\n  let payloadSource = 'root';\n\n  if (root.body && typeof root.body === 'object' && !Array.isArray(root.body)) {\n    payload = root.body;\n    payloadSource = 'body_object';\n  } else if (typeof root.body === 'string') {\n    const parsedBody = parseJsonObject(root.body);\n    if (parsedBody) {\n      payload = parsedBody;\n      payloadSource = 'body_json_string';\n    } else {\n      payload = root;\n      payloadSource = 'body_string_unparsed';\n    }\n  }\n\n  const cid = toOptionalString(pickValue(payload.cid, root.cid));\n  const sendUserId = toOptionalString(pickValue(payload.send_user_id, payload.sendUserId, root.send_user_id, root.sendUserId));\n  const sendMessage = toOptionalString(pickValue(payload.send_message, payload.sendMessage, root.send_message, root.sendMessage));\n\n  const contentTypeRaw = pickValue(payload.content_type, payload.contentType, root.content_type, root.contentType);\n  const contentTypeNum = toOptionalInt(contentTypeRaw);\n  const contentType = contentTypeNum !== null ? contentTypeNum : toOptionalString(contentTypeRaw);\n\n  const dryRunRaw = pickValue(payload.dry_run, payload.dryRun, root.dry_run, root.dryRun);\n  const dryRun = parseTruthyDryRun(dryRunRaw);\n\n  const cooldownSeconds = toOptionalInt(pickValue(payload.cooldown_seconds, payload.cooldownSeconds, root.cooldown_seconds, root.cooldownSeconds));\n  const maxReplyChars = toOptionalInt(pickValue(payload.max_reply_chars, payload.maxReplyChars, root.max_reply_chars, root.maxReplyChars));\n  const itemId = toOptionalString(pickValue(payload.item_id, payload.itemId, root.item_id, root.itemId));\n\n  return {\n    json: {\n      event: toOptionalString(pickValue(payload.event, root.event)),\n      cid,\n      send_user_id: sendUserId,\n      send_message: sendMessage,\n      content_type: contentType,\n      dry_run: dryRun,\n      cooldown_seconds: cooldownSeconds,\n      max_reply_chars: maxReplyChars,\n      item_id: itemId,\n      send_user_name: toOptionalString(pickValue(payload.send_user_name, payload.sendUserName, root.send_user_name, root.sendUserName)),\n      image_url: toOptionalString(pickValue(payload.image_url, payload.imageUrl, root.image_url, root.imageUrl)),\n      original_payload: payload,\n      webhook_meta: {\n        payload_source: payloadSource,\n        headers: root.headers && typeof root.headers === 'object' ? root.headers : {},\n        query: root.query && typeof root.query === 'object' ? root.query : {},\n        params: root.params && typeof root.params === 'object' ? root.params : {},\n      },\n    },\n  };\n});"
+      }
+    },
+    {
       "id": "Dedup",
       "name": "去重",
       "type": "n8n-nodes-base.code",
@@ -513,7 +526,7 @@
       "main": [
         [
           {
-            "node": "保留原始入站消息",
+            "node": "入站归一化",
             "type": "main",
             "index": 0
           }
@@ -827,6 +840,17 @@
         [
           {
             "node": "归一化 OpenClaw 回复",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "入站归一化": {
+      "main": [
+        [
+          {
+            "node": "保留原始入站消息",
             "type": "main",
             "index": 0
           }

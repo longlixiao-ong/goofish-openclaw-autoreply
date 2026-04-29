@@ -26,17 +26,23 @@ Expected input:
 
 Steps:
 
-1. Validate payload.
-2. De-duplicate by `cid`, `send_user_id`, message text, optional message id and timestamp.
-3. Check auto-reply state.
-4. Apply conversation cooldown.
-5. Run handoff gate classification (refund/after-sale/complaint/legal/off-platform/contact/payment/shipping/order disputes, threats/abuse, etc.).
-6. If handoff gate hits: `handoff=true`, stop before OpenClaw and before `/send`.
-7. If handoff gate does not hit: read `GET /items/snapshot`, attach `item_context`, then call OpenClaw.
-8. Normalize OpenClaw response contract: `reply`, `should_send`, `handoff`, `reason`.
-9. Sanitize reply and run external-contact scan.
-10. Send gate (fail closed): block send on `handoff=true`, `should_send=false`, empty reply, or any system exception.
-11. Non-dry-run send path must go through `POST /send` only.
+1. Normalize inbound webhook payload:
+   - If Webhook output is wrapped as `{ body, headers, query, params }` and `body` is an object, use `body`.
+   - If `body` is a JSON string, parse it as payload.
+   - Otherwise use top-level payload.
+   - Keep `headers/query/params` in `webhook_meta`; normalize core fields to top-level (`cid`, `send_user_id`, `send_message`, `dry_run`, etc.).
+2. Validate payload.
+3. De-duplicate by `cid`, `send_user_id`, message text, optional message id and timestamp.
+4. Dry-run requests skip dedup persistence (`dedup_skipped=true`) to avoid polluting dedup store.
+5. Check auto-reply state.
+6. Apply conversation cooldown.
+7. Run handoff gate classification (refund/after-sale/complaint/legal/off-platform/contact/payment/shipping/order disputes, threats/abuse, etc.).
+8. If handoff gate hits: `handoff=true`, stop before OpenClaw and before `/send`.
+9. If handoff gate does not hit: read `GET /items/snapshot`, attach `item_context`, then call OpenClaw.
+10. Normalize OpenClaw response contract: `reply`, `should_send`, `handoff`, `reason`.
+11. Sanitize reply and run external-contact scan.
+12. Send gate (fail closed): block send on `handoff=true`, `should_send=false`, empty reply, or any system exception.
+13. Non-dry-run send path must go through `POST /send` only.
 
 OpenClaw runtime mode selection:
 
