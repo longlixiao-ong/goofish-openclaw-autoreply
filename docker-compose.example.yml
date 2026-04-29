@@ -14,9 +14,7 @@ services:
     volumes:
       - ./n8n_data:/home/node/.n8n
       - ./n8n:/workspace/n8n
-      - ./scripts:/workspace/scripts:ro
       - ./data:/workspace/data
-      - ./goofish-state:/workspace/goofish-state:ro
       - ./logs:/workspace/logs
 
   goofish-watcher:
@@ -31,16 +29,17 @@ services:
     depends_on:
       - n8n
 
-  # Optional later: replace shell-based message sending with a long-running HTTP bridge.
-  # goofish-bridge:
-  #   build:
-  #     context: ./goofish-bridge
-  #   restart: always
-  #   env_file:
-  #     - .env
-  #   ports:
-  #     - "8787:8787"
-  #   volumes:
-  #     - ./goofish-state:/root/.goofish-cli
-  #     - ./data:/app/data
-  #     - ./logs:/app/logs
+  goofish-bridge:
+    build:
+      context: ./goofish-bridge
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./goofish-state:/root/.goofish-cli
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - n8n
