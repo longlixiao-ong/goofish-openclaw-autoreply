@@ -1159,3 +1159,14 @@ python -m json.tool n8n/workflows/goofish-inbound.example.json
 See `docs/LOCAL_SMOKE_TEST.md`.
 Local smoke test result -> `docs/SMOKE_TEST_RESULT.md`.
 N8N control workflow -> `docs/N8N_CONTROL_WORKFLOW.md`.
+
+### Item context dry-run notes
+
+- For Docker Compose dry-run, keep `ITEMS_SNAPSHOT_PATH=/app/data/items_snapshot.json`.
+- You can generate a safe local snapshot fixture with:
+
+```powershell
+python scripts/write_test_items_snapshot.py
+```
+
+This script only writes fake test data to `data/items_snapshot.json`, does not read cookies, does not access Xianyu, and does not send messages.

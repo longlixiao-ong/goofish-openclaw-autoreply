@@ -162,7 +162,7 @@ def summarize_goofish_auth_status() -> dict[str, Any]:
 
 
 def get_snapshot_path() -> Path:
-    raw = os.environ.get("ITEMS_SNAPSHOT_PATH", "goofish-bridge/data/items_snapshot.json")
+    raw = os.environ.get("ITEMS_SNAPSHOT_PATH", "/app/data/items_snapshot.json")
     return Path(raw)
 
 
