@@ -32,3 +32,5 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
+
+docker-compose.yml
