@@ -33,7 +33,7 @@
     },
     {
       "id": "SwitchCheck",
-      "name": "自动客服开关检查",
+      "name": "保留原始入站消息",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
@@ -41,7 +41,68 @@
         280
       ],
       "parameters": {
-        "jsCode": "// TODO: 读取 data/autoreply-state.json\n// 若 enabled=false 则抛错或打标后结束\nreturn items;"
+        "jsCode": "return items.map((item) => ({\n  json: {\n    ...item.json,\n    original: item.json,\n  },\n}));"
+      }
+    },
+    {
+      "id": "AutoReplyStatusRequest",
+      "name": "goofish-bridge /autoreply/status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -700,
+        280
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "http://goofish-bridge:8787/autoreply/status"
+      }
+    },
+    {
+      "id": "AutoReplyEnabledIf",
+      "name": "IF 自动客服已开启",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -520,
+        280
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.state.enabled}}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "RestoreOriginalInbound",
+      "name": "恢复原始入站消息",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -700,
+        420
+      ],
+      "parameters": {
+        "jsCode": "const saved = $(\"保留原始入站消息\").item.json;\nconst original = saved.original ?? saved;\nreturn [{ json: { ...original } }];"
+      }
+    },
+    {
+      "id": "AutoReplyDisabledEnd",
+      "name": "自动客服关闭结束",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -340,
+        120
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: { ok: true, send: false, reason: \"autoreply_disabled\", message: \"autoreply is disabled\" } }];"
       }
     },
     {
@@ -194,14 +255,54 @@
       "main": [
         [
           {
-            "node": "自动客服开关检查",
+            "node": "保留原始入站消息",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "自动客服开关检查": {
+    "保留原始入站消息": {
+      "main": [
+        [
+          {
+            "node": "goofish-bridge /autoreply/status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "goofish-bridge /autoreply/status": {
+      "main": [
+        [
+          {
+            "node": "IF 自动客服已开启",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF 自动客服已开启": {
+      "main": [
+        [
+          {
+            "node": "恢复原始入站消息",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "自动客服关闭结束",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "恢复原始入站消息": {
       "main": [
         [
           {
