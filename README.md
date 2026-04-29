@@ -615,7 +615,7 @@ services:
     image: n8nio/n8n:latest
     restart: always
     ports:
-      - "5678:5678"
+      - "127.0.0.1:5678:5678"
     volumes:
       - ./n8n_data:/home/node/.n8n
 
@@ -1025,14 +1025,16 @@ docker compose logs -f goofish-watcher
 2. 准备 `data/autoreply-state.json`（可从 `data/autoreply-state.example.json` 复制）。
 3. 启动 `n8n` 与 `goofish-watcher`。
 4. 在 n8n 导入 `n8n/workflows/goofish-inbound.example.json`。
-5. 按节点补齐本机 `OPENCLAW_REPLY_URL` 与 `send_text.py` 执行路径。
+5. Compose 容器内默认使用 `OPENCLAW_REPLY_URL=http://openclaw:18789/reply`，`send_text.py` 仅作为本地调试备用。
 6. 保持 `safe_mode` 与限流参数，先用低风险问句做流程验证。
 
 ### 19.4 n8n Webhook 配置
 
 - `goofish-watcher` 环境变量：`N8N_WEBHOOK_URL=http://n8n:5678/webhook/goofish-inbound`
+- 宿主机访问 n8n：`http://127.0.0.1:5678`（默认仅本机绑定）
 - n8n Webhook 节点：`POST /webhook/goofish-inbound`
 - 入站只处理 `event=message`，其余事件直接忽略。
+- n8n 容器内调用 mock OpenClaw：`http://openclaw:18789/reply`
 
 ### 19.5 OpenClaw 返回 JSON 格式（要求）
 
