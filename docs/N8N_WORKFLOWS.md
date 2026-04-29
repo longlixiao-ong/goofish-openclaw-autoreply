@@ -34,7 +34,7 @@ Steps:
 2. Validate payload.
 3. De-duplicate by `cid`, `send_user_id`, message text, optional message id and timestamp.
 4. Dry-run requests skip dedup persistence (`dedup_skipped=true`) to avoid polluting dedup store.
-5. Duplicate route guard only triggers when `is_duplicate=true` and `dry_run` is not truthy (`true/"true"/1/"1"`); true branch must go to `重复消息结束`, false branch must continue via `保留原始入站消息`.
+5. Duplicate route guard only triggers when `is_duplicate=true` and `dry_run` is not truthy (`true/"true"/1/"1"`); true branch must go to `重复消息结束`, false branch must continue via `保留原始入站消息` (in this exported workflow, runtime output mapping is calibrated as false=`main[0]`, true=`main[1]`).
 6. Check auto-reply state.
 7. Apply conversation cooldown.
 8. Run handoff gate classification (refund/after-sale/complaint/legal/off-platform/contact/payment/shipping/order disputes, threats/abuse, etc.).
