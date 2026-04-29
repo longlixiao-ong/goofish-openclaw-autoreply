@@ -247,6 +247,46 @@
       }
     },
     {
+      "id": "KeepItemContextPayload",
+      "name": "保留商品上下文请求原始 payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        120,
+        360
+      ],
+      "parameters": {
+        "jsCode": "return items.map((item) => ({\n  json: {\n    ...item.json,\n    item_context_original: JSON.parse(JSON.stringify(item.json || {})),\n  },\n}));"
+      }
+    },
+    {
+      "id": "ItemsSnapshotRequest",
+      "name": "goofish-bridge /items/snapshot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        240,
+        360
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "http://goofish-bridge:8787/items/snapshot"
+      }
+    },
+    {
+      "id": "MergeItemContext",
+      "name": "合并商品上下文",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        360,
+        360
+      ],
+      "parameters": {
+        "jsCode": "const sourceItems = $(\"保留商品上下文请求原始 payload\").all();\n\nreturn items.map((item, index) => {\n  const snapshot = item.json || {};\n  const sourceWrapper = (sourceItems[index] && sourceItems[index].json) || {};\n  const original = sourceWrapper.item_context_original || sourceWrapper || {};\n\n  let item_context = null;\n  let item_context_status = 'missing';\n  let item_context_reason = String(snapshot.reason || 'snapshot_unavailable');\n\n  if (snapshot.ok === true) {\n    item_context = {\n      available: true,\n      source: 'items_snapshot',\n      item_count: Number(snapshot.item_count ?? 0),\n      items: Array.isArray(snapshot.items) ? snapshot.items : [],\n      section_counts: snapshot.section_counts || {},\n      metadata: snapshot.metadata || {},\n    };\n    item_context_status = 'available';\n    item_context_reason = '';\n  }\n\n  return {\n    json: {\n      ...original,\n      cid: original.cid,\n      send_user_id: original.send_user_id,\n      send_message: original.send_message,\n      content_type: original.content_type,\n      dry_run: original.dry_run,\n      risk: original.risk,\n      risk_reason: original.risk_reason,\n      rule_reply: original.rule_reply,\n      cooldown_seconds: original.cooldown_seconds,\n      max_reply_chars: original.max_reply_chars,\n      item_context,\n      item_context_status,\n      item_context_reason,\n    },\n  };\n});"
+      }
+    },
+    {
       "id": "OpenClawContext",
       "name": "保留 OpenClaw 请求上下文",
       "type": "n8n-nodes-base.code",
@@ -273,7 +313,7 @@
         "url": "={{$env.OPENCLAW_REPLY_URL || 'http://openclaw:18789/reply'}}",
         "sendBody": true,
         "contentType": "json",
-        "jsonBody": "={\"cid\": $json.cid, \"toid\": $json.send_user_id, \"message\": $json.send_message, \"risk\": $json.risk, \"rule_reply\": $json.rule_reply}"
+        "jsonBody": "={\"cid\": $json.cid, \"toid\": $json.send_user_id, \"message\": $json.send_message, \"risk\": $json.risk, \"rule_reply\": $json.rule_reply, \"item_context\": $json.item_context, \"item_context_status\": $json.item_context_status, \"item_context_reason\": $json.item_context_reason}"
       }
     },
     {
@@ -518,6 +558,39 @@
       ]
     },
     "低风险规则回复": {
+      "main": [
+        [
+          {
+            "node": "保留商品上下文请求原始 payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "保留商品上下文请求原始 payload": {
+      "main": [
+        [
+          {
+            "node": "goofish-bridge /items/snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "goofish-bridge /items/snapshot": {
+      "main": [
+        [
+          {
+            "node": "合并商品上下文",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "合并商品上下文": {
       "main": [
         [
           {
