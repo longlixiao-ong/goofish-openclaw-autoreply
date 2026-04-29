@@ -30,12 +30,24 @@ Steps:
 2. De-duplicate by `cid`, `send_user_id`, message text, optional message id and timestamp.
 3. Check auto-reply state.
 4. Apply conversation cooldown.
-5. Classify risk.
-6. If image exists, call OpenClaw vision flow.
-7. Call OpenClaw reply flow.
-8. Sanitize reply.
-9. Scan external-contact and off-platform payment words.
-10. Send or hand off.
+5. Run handoff gate classification (refund/after-sale/complaint/legal/off-platform/contact/payment/shipping/order disputes, threats/abuse, etc.).
+6. If handoff gate hits: `handoff=true`, stop before OpenClaw and before `/send`.
+7. If handoff gate does not hit: read `GET /items/snapshot`, attach `item_context`, then call OpenClaw.
+8. Normalize OpenClaw response contract: `reply`, `should_send`, `handoff`, `reason`.
+9. Sanitize reply and run external-contact scan.
+10. Send gate (fail closed): block send on `handoff=true`, `should_send=false`, empty reply, or any system exception.
+11. Non-dry-run send path must go through `POST /send` only.
+
+Dry-run output (always `send=false`) includes:
+
+- `handoff`
+- `handoff_reason`
+- `route_reason`
+- `item_context_status`
+- `item_context_reason`
+- `openclaw_response`
+- `should_send`
+- `final_reply`
 
 ## Workflow 2: auto-reply switch
 
