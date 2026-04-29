@@ -1,4 +1,7 @@
 services:
+  # n8n reads OPENCLAW_REPLY_URL from .env.
+  # - mock mode (default): OPENCLAW_REPLY_URL=http://openclaw:18789/reply
+  # - real mode: point OPENCLAW_REPLY_URL to your real OpenClaw /reply endpoint
   n8n:
     image: n8nio/n8n:latest
     restart: always
@@ -11,18 +14,24 @@ services:
       - N8N_PORT=5678
       - N8N_PROTOCOL=http
       - TZ=Asia/Shanghai
+      - OPENCLAW_REPLY_URL=${OPENCLAW_REPLY_URL:-http://openclaw:18789/reply}
     volumes:
       - ./n8n_data:/home/node/.n8n
       - ./n8n:/workspace/n8n
       - ./data:/workspace/data
       - ./logs:/workspace/logs
 
+  # Local default mock OpenClaw.
+  # In real OpenClaw mode, keep this service defined for quick rollback,
+  # but you can choose not to start it.
   openclaw:
     build:
       context: ./mock-openclaw
     restart: always
     env_file:
       - .env
+    ports:
+      - "127.0.0.1:18789:18789"
     expose:
       - "18789"
 
