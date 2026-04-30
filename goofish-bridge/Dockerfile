@@ -11,6 +11,6 @@ COPY app.py ./app.py
 COPY items.py ./items.py
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN python -m playwright install chromium
+RUN python -m playwright install --with-deps chromium
 
 CMD ["sh", "-c", "uvicorn app:APP --host ${GOOFISH_BRIDGE_HOST:-0.0.0.0} --port ${GOOFISH_BRIDGE_PORT:-8787}"]

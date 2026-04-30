@@ -1,146 +1,94 @@
 # OpenClaw Runtime Integration
 
-本文件说明如何在 n8n inbound workflow 中切换两种 OpenClaw runtime：
+本项目的 bridge 运行时只支持：
 
-- `custom_reply`（兼容 mock-openclaw / 自定义 `/reply`）
-- `openai_chat`（官方 OpenClaw Gateway `/v1/chat/completions`）
+- `OPENCLAW_RUNTIME_MODE=openai_chat`
+- OpenClaw Gateway OpenAI-compatible `/v1/chat/completions`
 
-边界不变：
+不再维护 `custom_reply` 兼容路径。
 
-- 不绕过 `goofish-bridge /send` 安全闸门
-- 不启动 watcher 做真实监听验证
-- 不执行真实闲鱼发送
+## 1) 运行时配置
 
----
-
-## 1) 环境变量
-
-在 `.env` 配置：
+`.env` 示例：
 
 ```text
-OPENCLAW_RUNTIME_MODE=custom_reply
-OPENCLAW_REPLY_URL=http://openclaw:18789/reply
+OPENCLAW_RUNTIME_MODE=openai_chat
 OPENCLAW_CHAT_COMPLETIONS_URL=http://host.docker.internal:18789/v1/chat/completions
 OPENCLAW_GATEWAY_TOKEN=<不要提交真实值>
 OPENCLAW_MODEL=openclaw/default
+OPENCLAW_TIMEOUT_SECONDS=20
 ```
 
 说明：
 
-- `OPENCLAW_RUNTIME_MODE=custom_reply` 时使用 `OPENCLAW_REPLY_URL`
-- `OPENCLAW_RUNTIME_MODE=openai_chat` 时使用 `OPENCLAW_CHAT_COMPLETIONS_URL`
-- `OPENCLAW_GATEWAY_TOKEN` 只用于 `openai_chat`，通过 `Authorization: Bearer <token>` 发送
+- `OPENCLAW_MODEL` 是 OpenClaw Gateway 路由名/兼容字段。
+- bridge 不管理底层模型供应商，底层模型由 OpenClaw / New API 后台管理。
 
----
+## 2) Bridge -> OpenClaw 请求结构
 
-## 2) runtime 模式
+bridge 发送给 OpenClaw 的核心上下文：
 
-### A. `custom_reply`（默认本地开发）
+- `buyer_message`
+- `cid`
+- `send_user_id`
+- `content_type`
+- `item_context`（最小化字段）
+- `conversation_state`（简要）
+- `customer_service_policy`
+- `bridge_guardrails`
+- `dry_run`
+- `max_reply_chars`
 
-- 请求 URL：`OPENCLAW_REPLY_URL`
-- 请求体：当前自定义 JSON（`cid/toid/message/item_context/customer_service_policy/...`）
-- 兼容 mock-openclaw，不破坏本地开发链路
+bridge 不注入复杂客服策略 Prompt；复杂策略由 OpenClaw 侧统一管理。
 
-### B. `openai_chat`（官方 Gateway）
+## 3) OpenClaw 返回归一化要求
 
-- 请求 URL：`OPENCLAW_CHAT_COMPLETIONS_URL`
-- Header：`Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>`
-- 请求体（OpenAI Chat Completions）：
+bridge 要求：
+
+- 使用 OpenAI-compatible `choices[0].message.content`
+- `content` 必须是 JSON 对象
+- 标准字段：
 
 ```json
 {
-  "model": "openclaw/default",
-  "messages": [
-    {"role": "system", "content": "...客服策略..."},
-    {"role": "user", "content": "...买家消息 + item_context JSON..."}
-  ],
-  "user": "<cid或send_user_id>"
+  "reply": "...",
+  "should_send": true,
+  "handoff": false,
+  "reason": "...",
+  "risk": "low"
 }
 ```
 
----
+若命中以下任一情况，bridge 必须 fail-closed（不发送并转人工）：
 
-## 3) 响应解析与兼容
+- 非 JSON
+- HTML/错误页
+- 空回复
+- 外联词
+- `<think>`/reasoning 泄露
+- 异常文本（traceback/exception/`undefined|null|nan` 独立词）
 
-workflow 归一化节点支持：
+## 4) dry-run 验证（不发送）
 
-- `reply` / `text` / `message` / `content`
-- `choices[0].message.content`
-- 嵌套对象：`data.*` / `result.*` / `output.*`
-- 发送布尔别名：`should_send` / `shouldSend` / `send`
-- 转人工别名：`handoff` / `needs_handoff` / `needs_human` 等
-
-对于 `openai_chat`：
-
-- 若 `choices[0].message.content` 本身是 JSON 字符串，会二次解析提取 `reply/should_send/handoff/reason`
-
----
-
-## 4) Fail-Closed 行为（必须）
-
-以下任一命中都不会进入 `/send`：
-
-- `handoff=true`
-- `should_send=false`
-- `reply` 为空
-- OpenClaw HTTP 调用失败
-- OpenClaw 返回错误对象（如 unauthorized/forbidden/internal error）
-- `openai_chat` 返回 HTML 内容
-
-因此 401/403/500/HTML 响应都 fail-closed。
-
----
-
-## 5) dry-run 验证（不发送）
-
-### 5.1 协议脚本验证
-
-`scripts/test_openclaw_reply.py` 同时支持两种模式：
+协议脚本：
 
 ```powershell
-# custom_reply
-python scripts/test_openclaw_reply.py --mode custom_reply --url http://127.0.0.1:18789/reply
-
-# openai_chat
-python scripts/test_openclaw_reply.py --mode openai_chat --url http://host.docker.internal:18789/v1/chat/completions --token "<TOKEN>" --model openclaw/default
-```
-
-离线校验（不发 HTTP）：
-
-```powershell
+python scripts/test_openclaw_reply.py --url http://host.docker.internal:18789/v1/chat/completions --token "<TOKEN>" --model openclaw/default
 python scripts/test_openclaw_reply.py --self-check
 ```
 
-离线校验覆盖：
+全链路预检：
 
-- custom_reply 请求格式
-- openai_chat 请求格式
-- `choices[0].message.content` 解析
-- Unauthorized/HTML/error fail-closed
+```powershell
+python scripts/production_preflight.py
+```
 
-### 5.2 n8n 入站 dry-run
+关键检查点：
 
-向 inbound webhook 发 `dry_run=true`，检查返回字段：
+- presale dry-run：`reason=dry_run`、`final_reply` 非空、`reply_source!=none`、`openai_http_status=200`、`send=false`
+- handoff dry-run：`handoff=true`、`send=false`、reason/route_reason/handoff_reason 可解释
 
-- `openclaw_response`
-- `should_send`
-- `handoff`
-- `handoff_reason`（或 `openclaw_reason`）
-- `final_reply`
-- `send=false`
+## 5) 边界
 
----
-
-## 6) 切换与回滚
-
-切到官方 Gateway（`openai_chat`）：
-
-1. 设置 `OPENCLAW_RUNTIME_MODE=openai_chat`
-2. 设置 `OPENCLAW_CHAT_COMPLETIONS_URL` 和 `OPENCLAW_GATEWAY_TOKEN`
-3. 保持不启动 watcher
-
-回滚到 mock：
-
-1. 设置 `OPENCLAW_RUNTIME_MODE=custom_reply`
-2. 设置 `OPENCLAW_REPLY_URL=http://openclaw:18789/reply`
-3. 启动本地 `openclaw` mock 服务
+- 不绕过 `/send` 安全闸门。
+- 不执行真实闲鱼发送进行 runtime 协议测试。

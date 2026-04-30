@@ -2,46 +2,51 @@
 
 ## Goal
 
-Use `goofish-cli` as the Goofish/Xianyu operation layer, `n8n` as the workflow orchestration layer, and `OpenClaw` as the only AI brain.
+以 OpenClaw 为唯一 AI 主控，`goofish-cli` 为闲鱼操作层，`n8n` 为编排层，`goofish-bridge` 为安全网关。
 
-## MVP data flow
+## Production Flow
 
 ```text
 Goofish buyer message
   -> goofish message watch
-  -> goofish-watcher.py
-  -> n8n webhook
-  -> de-dup / cooldown / handoff gate
-  -> (handoff hit) stop and handoff
-  -> (default) item_context + OpenClaw Agent
-  -> sanitize reply + send gate
-  -> goofish-bridge /send
-  -> Goofish buyer
+  -> goofish-watcher
+  -> n8n inbound webhook
+  -> goofish-bridge /autoreply/decide
+  -> IF(send=true && dry_run=false)
+      -> goofish-bridge /send
+      -> goofish message send
 ```
 
-## Stable data flow
+## Responsibility Boundaries
 
-```text
-Goofish WebSocket
-  -> goofish-bridge watch loop
-  -> n8n webhook
-  -> handoff gate (n8n)
-  -> OpenClaw Agent (default path)
-  -> n8n sanitize + should_send/handoff gate
-  -> goofish-bridge /send
-  -> Goofish WebSocket
-```
+- `OpenClaw`（唯一 AI 大脑）
+  - 模型选择与路由
+  - Prompt 与策略
+  - 记忆与视觉理解
+  - 小刀议价/客服回复策略
 
-## Core boundaries
+- `goofish-bridge`（安全网关）
+  - `X-Bridge-Token` 鉴权
+  - 入站归一化与字段校验
+  - dedup（TTL）/cooldown
+  - 转人工 gate
+  - item_context 最小化读取与透传
+  - OpenClaw 调用与结果归一化
+  - fail-closed 决策
+  - 最终 `/send` 安全闸门
 
-- `goofish-cli`: login state, IM watch, IM send, item query, media upload, publish, built-in rate limit and circuit breaker.
-- `n8n`: workflow orchestration, state switch, de-dup, cooldown, handoff gating, dry-run diagnostics, send decision.
-- `OpenClaw`: model, image understanding, seller persona, bargain strategy, memory and final response decision.
+- `n8n`（编排层）
+  - Webhook 接入
+  - 调用 `/autoreply/decide`
+  - 按 `send/dry_run` 路由到 `/send` 或“不发送结束”
+  - 可观测性与控制流编排
+
+- `goofish-cli`（操作层）
+  - 登录、收发消息、商品/媒体等平台动作
+  - 自带写操作限流与熔断
 
 ## Non-goals
 
-- Do not automate around platform safety checks.
-- Do not operate unauthorized accounts.
-- Do not support fraudulent trading behavior.
-- Do not guide buyers to off-platform transactions.
-- Do not expose cookies, API keys or session state.
+- 不把 goofish-bridge 做成独立客服模型系统
+- 不在 bridge 中配置底层模型供应商
+- 不绕过平台风控、不自动处理滑块、不引导站外交易

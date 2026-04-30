@@ -15,9 +15,8 @@ Copy-Item .env.example .env
 # Optional but recommended: keep snapshot path aligned with compose mount
 # ITEMS_SNAPSHOT_PATH=/app/data/items_snapshot.json
 
-# Optional mode switch:
-# - mock mode (default): OPENCLAW_REPLY_URL=http://openclaw:18789/reply
-# - real mode: set OPENCLAW_REPLY_URL to real OpenClaw /reply URL
+# Runtime mode is openai_chat only:
+# OPENCLAW_CHAT_COMPLETIONS_URL=http://openclaw:18789/v1/chat/completions
 
 # 2) Prepare compose file from example
 Copy-Item docker-compose.example.yml docker-compose.yml
@@ -36,9 +35,9 @@ curl http://127.0.0.1:8787/health
 
 # 5.1) OpenClaw protocol probe only (never calls /send)
 # mock mode:
-python scripts/test_openclaw_reply.py --url http://127.0.0.1:18789/reply
+python scripts/test_openclaw_reply.py --url http://127.0.0.1:18789/v1/chat/completions --token "<TOKEN>"
 # real mode:
-# python scripts/test_openclaw_reply.py --url "<YOUR_REAL_OPENCLAW_REPLY_URL>"
+# python scripts/test_openclaw_reply.py --url "<YOUR_REAL_OPENCLAW_CHAT_COMPLETIONS_URL>" --token "<TOKEN>"
 
 # 6A) Preferred: refresh real snapshot from current logged-in account (read-only)
 python scripts/refresh_items_snapshot.py --base-url http://127.0.0.1:8787
@@ -50,7 +49,7 @@ python scripts/refresh_items_snapshot.py --base-url http://127.0.0.1:8787
 # python scripts/write_test_items_snapshot.py
 
 # 7) Snapshot probe used by n8n item_context chain
-curl http://127.0.0.1:8787/items/snapshot
+curl http://127.0.0.1:8787/items/snapshot -H "X-Bridge-Token: ${BRIDGE_AUTH_TOKEN}"
 
 # 8) Run smoke checker (no /send)
 python scripts/smoke_bridge.py
