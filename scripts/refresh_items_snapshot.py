@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import urllib.error
@@ -37,11 +38,20 @@ def parse_args() -> argparse.Namespace:
         default="docker-compose",
         help='Compose command, for example: "docker-compose" or "docker compose"',
     )
+    parser.add_argument(
+        "--bridge-token",
+        default=(os.environ.get("BRIDGE_AUTH_TOKEN", "") or "").strip(),
+        help="X-Bridge-Token value (defaults to BRIDGE_AUTH_TOKEN env)",
+    )
     return parser.parse_args()
 
 
-def http_get_json(url: str, timeout: float) -> dict[str, Any]:
-    req = urllib.request.Request(url=url, headers={"Accept": "application/json"}, method="GET")
+def http_get_json(url: str, timeout: float, bridge_token: str) -> dict[str, Any]:
+    headers = {"Accept": "application/json"}
+    token = bridge_token.strip()
+    if token:
+        headers["X-Bridge-Token"] = token
+    req = urllib.request.Request(url=url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
             raw = response.read().decode("utf-8", errors="replace")
@@ -69,10 +79,14 @@ def docker_exec_get_json(
     service: str,
     url: str,
     timeout: float,
+    bridge_token: str,
 ) -> dict[str, Any]:
+    token = bridge_token.replace("\\", "\\\\").replace("'", "\\'")
     code = (
         "import json,urllib.request;"
-        f"req=urllib.request.Request('{url}',headers={{'Accept':'application/json'}},method='GET');"
+        "headers={'Accept':'application/json'};"
+        + (f"headers['X-Bridge-Token']='{token}';" if token else "")
+        + f"req=urllib.request.Request('{url}',headers=headers,method='GET');"
         f"res=urllib.request.urlopen(req,timeout={timeout});"
         "print(res.read().decode('utf-8','replace'))"
     )
@@ -120,9 +134,10 @@ def main() -> int:
             service=args.service,
             url=refresh_url,
             timeout=args.timeout,
+            bridge_token=args.bridge_token,
         )
     else:
-        refresh_payload = fetch(refresh_url, timeout=args.timeout)
+        refresh_payload = fetch(refresh_url, timeout=args.timeout, bridge_token=args.bridge_token)
 
     summary: dict[str, Any] = {
         "refresh_url": refresh_url,
@@ -145,9 +160,10 @@ def main() -> int:
                 service=args.service,
                 url=snapshot_url,
                 timeout=args.timeout,
+                bridge_token=args.bridge_token,
             )
         else:
-            snapshot_payload = fetch(snapshot_url, timeout=args.timeout)
+            snapshot_payload = fetch(snapshot_url, timeout=args.timeout, bridge_token=args.bridge_token)
         snapshot_ok = bool(snapshot_payload.get("ok") is True)
         summary["snapshot_ok"] = snapshot_ok
         summary["snapshot_item_count"] = int(snapshot_payload.get("item_count", 0) or 0)

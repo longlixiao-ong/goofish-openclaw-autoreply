@@ -15,6 +15,10 @@ SEND_NODE = "goofish-bridge /send"
 NOT_SEND_NODE = "不发送结束"
 
 # Calibrated to exported workflow runtime behavior in this repo.
+# In current n8n export, IF node output index mapping is:
+#   index 0 => false branch
+#   index 1 => true branch
+# If n8n export format changes, update these constants and keep run_routing_cases passing.
 IF_TRUE_OUTPUT_INDEX = 1
 IF_FALSE_OUTPUT_INDEX = 0
 
@@ -137,6 +141,14 @@ def run_routing_cases(workflow: dict[str, Any]) -> list[str]:
     duplicate_case = {"send": False, "dry_run": False}
     if simulate_if_next_node(duplicate_case, workflow) != NOT_SEND_NODE:
         issues.append("send=false case should route to 不发送结束")
+
+    duplicate_reason_case = {"send": False, "dry_run": False, "reason": "duplicate_message"}
+    if simulate_if_next_node(duplicate_reason_case, workflow) != NOT_SEND_NODE:
+        issues.append("duplicate_message case should route to 不发送结束")
+
+    handoff_case = {"send": False, "dry_run": False, "handoff": True, "reason": "handoff_gate"}
+    if simulate_if_next_node(handoff_case, workflow) != NOT_SEND_NODE:
+        issues.append("handoff case should route to 不发送结束")
 
     send_case = {"send": True, "dry_run": False}
     if simulate_if_next_node(send_case, workflow) != SEND_NODE:

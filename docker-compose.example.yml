@@ -19,6 +19,7 @@ services:
       - ./n8n:/workspace/n8n
       - ./data:/workspace/data
       - ./logs:/workspace/logs
+    # n8n image/runtime variants differ, healthcheck omitted by default.
 
   # Local default mock OpenClaw (kept for rollback and local dry-run).
   openclaw:
@@ -31,6 +32,18 @@ services:
       - "127.0.0.1:18789:18789"
     expose:
       - "18789"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:18789/health', timeout=3).status == 200 else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   goofish-watcher:
     build:
@@ -63,6 +76,18 @@ services:
       - HANDOFF_NOTIFY_WEBHOOK_URL=${HANDOFF_NOTIFY_WEBHOOK_URL}
     ports:
       - "127.0.0.1:8787:8787"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3).status == 200 else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     volumes:
       - ./goofish-state:/root/.goofish-cli
       - ./data:/app/data

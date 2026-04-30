@@ -28,8 +28,8 @@ curl.exe http://127.0.0.1:5678/webhook/goofish-autoreply/status
 安全收尾：
 
 ```powershell
-curl.exe -X POST http://127.0.0.1:8787/autoreply/stop
-curl.exe http://127.0.0.1:8787/autoreply/status
+curl.exe -X POST http://127.0.0.1:8787/autoreply/stop -H "X-Bridge-Token: $env:BRIDGE_AUTH_TOKEN"
+curl.exe http://127.0.0.1:8787/autoreply/status -H "X-Bridge-Token: $env:BRIDGE_AUTH_TOKEN"
 ```
 
 ## Verified local production webhook test

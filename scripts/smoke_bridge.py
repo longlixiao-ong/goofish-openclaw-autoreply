@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -17,6 +18,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local smoke check for goofish-bridge")
     parser.add_argument("--base-url", default="http://127.0.0.1:8787", help="Bridge base URL")
     parser.add_argument("--timeout", type=float, default=5.0, help="HTTP timeout in seconds")
+    parser.add_argument(
+        "--bridge-token",
+        default=(os.environ.get("BRIDGE_AUTH_TOKEN", "") or "").strip(),
+        help="X-Bridge-Token value (defaults to BRIDGE_AUTH_TOKEN env)",
+    )
     return parser.parse_args()
 
 
@@ -36,10 +42,14 @@ def http_call(
     path: str,
     method: str,
     timeout: float,
+    bridge_token: str,
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     url = f"{base_url.rstrip('/')}{path}"
     headers = {"Accept": "application/json"}
+    token = bridge_token.strip()
+    if token:
+        headers["X-Bridge-Token"] = token
     data: bytes | None = None
     if payload is not None:
         headers["Content-Type"] = "application/json"
@@ -113,6 +123,7 @@ def main() -> int:
             path=path,
             method=method,
             timeout=args.timeout,
+            bridge_token=args.bridge_token,
         )
         result["step"] = step_name
         results.append(result)

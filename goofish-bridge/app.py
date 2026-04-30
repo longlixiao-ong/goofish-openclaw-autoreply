@@ -1,4 +1,4 @@
-"""Long-running HTTP bridge for goofish-cli send + production autoreply runtime."""
+"""Security gateway for goofish autoreply runtime and final send guard."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ DEFAULT_AUTOREPLY_STATE: dict[str, Any] = {
     "safe_mode": True,
     "auto_send": True,
     "cooldown_seconds": 15,
+    "dedup_ttl_seconds": 600,
     "global_send_interval_seconds": 30,
     "max_reply_chars": 80,
 }
@@ -54,6 +55,8 @@ APP = FastAPI(title="goofish-bridge", version="2.0.0")
 SEND_GUARD_EXIT_CODE = 4
 AUTOREPLY_STATE_LOCK = threading.Lock()
 RUNTIME_STATE_LOCK = threading.Lock()
+MAX_DEDUP_ENTRIES = 500
+DEFAULT_DEDUP_TTL_SECONDS = 600
 
 EXTERNAL_CONTACT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("微信", re.compile(r"微信", re.IGNORECASE)),
@@ -81,7 +84,7 @@ ABNORMAL_TEXT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("error_leak", re.compile(r"\bexception\b", re.IGNORECASE)),
     ("error_leak", re.compile(r"^\s*error[:：]", re.IGNORECASE)),
     ("error_leak", re.compile(r"^\s*错误[:：]", re.IGNORECASE)),
-    ("error_leak", re.compile(r"undefined|null|nan", re.IGNORECASE)),
+    ("error_leak", re.compile(r"\b(?:undefined|null|nan)\b", re.IGNORECASE)),
 ]
 
 PUNCT_OR_SYMBOL_ONLY_PATTERN = re.compile(r"^[\s\W_]+$", re.UNICODE)
@@ -288,8 +291,40 @@ def normalize_runtime_state(data: dict[str, Any] | None) -> dict[str, Any]:
     dedup_map = runtime.get("dedup_map")
     cooldown_store = runtime.get("cooldown_store")
 
-    runtime["dedup_order"] = dedup_order if isinstance(dedup_order, list) else []
-    runtime["dedup_map"] = dedup_map if isinstance(dedup_map, dict) else {}
+    normalized_dedup_map: dict[str, int] = {}
+    if isinstance(dedup_map, dict):
+        for key, value in dedup_map.items():
+            dedup_key = to_optional_string(key)
+            if not dedup_key:
+                continue
+            timestamp_value: Any = value
+            if isinstance(value, dict):
+                timestamp_value = pick_value(value.get("ts_ms"), value.get("timestamp_ms"), value.get("timestamp"))
+            ts_ms = to_int(timestamp_value, default_value=0, min_value=0)
+            if ts_ms > 0:
+                normalized_dedup_map[dedup_key] = ts_ms
+
+    normalized_dedup_order: list[str] = []
+    seen: set[str] = set()
+    if isinstance(dedup_order, list):
+        for key in dedup_order:
+            dedup_key = to_optional_string(key)
+            if not dedup_key or dedup_key in seen:
+                continue
+            if dedup_key not in normalized_dedup_map:
+                continue
+            seen.add(dedup_key)
+            normalized_dedup_order.append(dedup_key)
+    for dedup_key in normalized_dedup_map:
+        if dedup_key not in seen:
+            normalized_dedup_order.append(dedup_key)
+
+    if len(normalized_dedup_order) > MAX_DEDUP_ENTRIES:
+        normalized_dedup_order = normalized_dedup_order[-MAX_DEDUP_ENTRIES:]
+        normalized_dedup_map = {key: normalized_dedup_map[key] for key in normalized_dedup_order}
+
+    runtime["dedup_order"] = normalized_dedup_order
+    runtime["dedup_map"] = normalized_dedup_map
     runtime["cooldown_store"] = cooldown_store if isinstance(cooldown_store, dict) else {}
 
     last_success = runtime.get("last_success_send_at")
@@ -300,6 +335,69 @@ def normalize_runtime_state(data: dict[str, Any] | None) -> dict[str, Any]:
             runtime["last_success_send_at"] = None
 
     return runtime
+
+
+def get_dedup_ttl_seconds(state: dict[str, Any]) -> int:
+    return to_int(
+        state.get("dedup_ttl_seconds"),
+        default_value=DEFAULT_DEDUP_TTL_SECONDS,
+        min_value=1,
+    )
+
+
+def cleanup_expired_dedup_entries(
+    state: dict[str, Any],
+    *,
+    ttl_seconds: int,
+    now_ms: int | None = None,
+) -> int:
+    dedup_map = state.get("dedup_map")
+    dedup_order = state.get("dedup_order")
+    if not isinstance(dedup_map, dict) or not isinstance(dedup_order, list):
+        return 0
+    if ttl_seconds <= 0:
+        return 0
+
+    current_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    expire_before = current_ms - (ttl_seconds * 1000)
+    removed = 0
+    retained_order: list[str] = []
+    seen: set[str] = set()
+
+    for raw_key in list(dedup_order):
+        dedup_key = to_optional_string(raw_key)
+        if not dedup_key or dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        ts_ms = to_int(dedup_map.get(dedup_key), default_value=0, min_value=0)
+        if ts_ms <= 0 or ts_ms < expire_before:
+            if dedup_key in dedup_map:
+                dedup_map.pop(dedup_key, None)
+                removed += 1
+            continue
+        retained_order.append(dedup_key)
+
+    for dedup_key in list(dedup_map.keys()):
+        if dedup_key in seen:
+            continue
+        ts_ms = to_int(dedup_map.get(dedup_key), default_value=0, min_value=0)
+        if ts_ms <= 0 or ts_ms < expire_before:
+            dedup_map.pop(dedup_key, None)
+            removed += 1
+            continue
+        retained_order.append(dedup_key)
+
+    if len(retained_order) > MAX_DEDUP_ENTRIES:
+        overflow = retained_order[:-MAX_DEDUP_ENTRIES]
+        for dedup_key in overflow:
+            if dedup_key in dedup_map:
+                dedup_map.pop(dedup_key, None)
+                removed += 1
+        retained_order = retained_order[-MAX_DEDUP_ENTRIES:]
+
+    state["dedup_order"] = retained_order
+    state["dedup_map"] = dedup_map
+    return removed
 
 
 def load_autoreply_state() -> dict[str, Any]:
@@ -352,6 +450,11 @@ def mutate_runtime_state(mutator):  # type: ignore[no-untyped-def]
             data = {}
 
         state = normalize_runtime_state(data if isinstance(data, dict) else None)
+        try:
+            dedup_ttl_seconds = get_dedup_ttl_seconds(load_autoreply_state())
+        except Exception:  # noqa: BLE001
+            dedup_ttl_seconds = DEFAULT_DEDUP_TTL_SECONDS
+        cleanup_expired_dedup_entries(state, ttl_seconds=dedup_ttl_seconds)
         result = mutator(state)
         atomic_write_json(runtime_file, state)
         return result
@@ -672,6 +775,29 @@ def parse_sections_param(raw_sections: str | None) -> list[str] | None:
     return parts or None
 
 
+def extract_image_payload(payload: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
+    candidates: list[tuple[str, list[str]]] = [
+        ("image_url", ["image_url", "imageUrl"]),
+        ("image_urls", ["image_urls", "imageUrls"]),
+        ("image_id", ["image_id", "imageId"]),
+        ("image_ids", ["image_ids", "imageIds"]),
+        ("images", ["images"]),
+        ("media_url", ["media_url", "mediaUrl"]),
+        ("media_urls", ["media_urls", "mediaUrls"]),
+        ("attachments", ["attachments"]),
+        ("image", ["image"]),
+    ]
+    image_payload: dict[str, Any] = {}
+    for output_key, alias_list in candidates:
+        value: Any = None
+        for alias in alias_list:
+            value = pick_value(value, payload.get(alias), root.get(alias))
+        if not is_meaningful(value):
+            continue
+        image_payload[output_key] = value
+    return image_payload
+
+
 def normalize_decide_input(raw_payload: dict[str, Any] | None) -> dict[str, Any]:
     root = raw_payload if isinstance(raw_payload, dict) else {}
     payload_source = "root"
@@ -706,6 +832,14 @@ def normalize_decide_input(raw_payload: dict[str, Any] | None) -> dict[str, Any]
             root.get("sendMessage"),
         )
     )
+    message_id = to_optional_string(
+        pick_value(
+            payload.get("message_id"),
+            payload.get("messageId"),
+            root.get("message_id"),
+            root.get("messageId"),
+        )
+    )
 
     content_type_raw = pick_value(
         payload.get("content_type"),
@@ -722,7 +856,9 @@ def normalize_decide_input(raw_payload: dict[str, Any] | None) -> dict[str, Any]
         "cid": cid,
         "send_user_id": send_user_id,
         "send_message": send_message,
+        "message_id": message_id,
         "content_type": content_type,
+        "image_payload": extract_image_payload(payload, root),
         "dry_run": parse_truthy(
             pick_value(payload.get("dry_run"), payload.get("dryRun"), root.get("dry_run"), root.get("dryRun"))
         ),
@@ -760,13 +896,14 @@ def normalize_decide_input(raw_payload: dict[str, Any] | None) -> dict[str, Any]
 
 
 def create_decide_result_base(normalized: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-    runtime_mode = str(os.environ.get("OPENCLAW_RUNTIME_MODE", "openai_chat") or "openai_chat").strip().lower()
-    if runtime_mode != "openai_chat":
-        runtime_mode = "openai_chat"
-
     max_reply_chars = to_int(
         normalized.get("max_reply_chars"),
         default_value=to_int(state.get("max_reply_chars"), get_max_reply_chars(), min_value=1),
+        min_value=1,
+    )
+    dedup_ttl_seconds = to_int(
+        state.get("dedup_ttl_seconds"),
+        default_value=DEFAULT_DEDUP_TTL_SECONDS,
         min_value=1,
     )
 
@@ -777,28 +914,36 @@ def create_decide_result_base(normalized: dict[str, Any], state: dict[str, Any])
         "cid": normalized.get("cid", ""),
         "send_user_id": normalized.get("send_user_id", ""),
         "send_message": normalized.get("send_message", ""),
+        "message_id": normalized.get("message_id", ""),
         "content_type": normalized.get("content_type", ""),
+        "image_payload": normalized.get("image_payload", {}),
         "dry_run": parse_truthy(normalized.get("dry_run")),
         "cooldown_seconds": to_int(
             normalized.get("cooldown_seconds"),
             default_value=to_int(state.get("cooldown_seconds"), DEFAULT_AUTOREPLY_STATE["cooldown_seconds"], min_value=0),
             min_value=0,
         ),
+        "dedup_ttl_seconds": dedup_ttl_seconds,
+        "remaining_seconds": 0,
         "max_reply_chars": max_reply_chars,
         "item_id": to_optional_string(normalized.get("item_id")),
+        "autoreply_enabled": state.get("enabled") is True,
+        "auto_send_enabled": state.get("auto_send") is True,
         "handoff": False,
         "handoff_reason": "",
         "should_send": True,
         "final_reply": "",
         "reply_source": "",
+        "risk": "medium",
         "item_context_status": "missing",
         "item_context_reason": "snapshot_unavailable",
-        "openai_runtime_mode": runtime_mode,
+        "openai_runtime_mode": "openai_chat",
         "openai_runtime_url": to_optional_string(os.environ.get("OPENCLAW_CHAT_COMPLETIONS_URL", "")),
         "openai_model": to_optional_string(os.environ.get("OPENCLAW_MODEL", "openclaw/default")) or "openclaw/default",
         "openai_timeout_seconds": env_int("OPENCLAW_TIMEOUT_SECONDS", 20, min_value=1),
         "openai_response": None,
         "openai_http_status": None,
+        "openclaw_output": None,
         "route_reason": "",
         "error": "",
         "dedup_key": "",
@@ -810,26 +955,55 @@ def create_decide_result_base(normalized: dict[str, Any], state: dict[str, Any])
     }
 
 
+def has_image_payload(image_payload: Any) -> bool:
+    if not isinstance(image_payload, dict):
+        return False
+    for value in image_payload.values():
+        if is_meaningful(value):
+            return True
+    return False
+
+
+def build_dedup_key(result: dict[str, Any], *, ttl_seconds: int, now_ms: int) -> str:
+    message_id = to_optional_string(result.get("message_id"))
+    if message_id:
+        return f"message_id::{message_id}"
+
+    cid = to_optional_string(result.get("cid"))
+    send_user_id = to_optional_string(result.get("send_user_id"))
+    send_message = to_optional_string(result.get("send_message"))
+    if not cid or not send_user_id or not send_message:
+        return ""
+    bucket_seconds = max(1, ttl_seconds)
+    time_bucket = now_ms // (bucket_seconds * 1000)
+    return f"{cid}::{send_user_id}::{send_message}::{time_bucket}"
+
+
 def apply_dedup_guard(result: dict[str, Any]) -> bool:
     if result.get("dry_run") is True:
         result["dedup_skipped"] = True
         result["dedup_skip_reason"] = "dry_run"
         return False
 
-    cid = to_optional_string(result.get("cid"))
-    send_user_id = to_optional_string(result.get("send_user_id"))
-    send_message = to_optional_string(result.get("send_message"))
-    dedup_key = f"{cid}::{send_user_id}::{send_message}"
+    ttl_seconds = to_int(result.get("dedup_ttl_seconds"), default_value=DEFAULT_DEDUP_TTL_SECONDS, min_value=1)
+    result["dedup_ttl_seconds"] = ttl_seconds
+    now_ms = int(time.time() * 1000)
+    dedup_key = build_dedup_key(result, ttl_seconds=ttl_seconds, now_ms=now_ms)
     result["dedup_key"] = dedup_key
+    if not dedup_key:
+        result["dedup_skipped"] = True
+        result["dedup_skip_reason"] = "missing_dedup_key"
+        return False
 
     def _mutate(state: dict[str, Any]) -> bool:
+        cleanup_expired_dedup_entries(state, ttl_seconds=ttl_seconds, now_ms=now_ms)
         dedup_order = state["dedup_order"]
         dedup_map = state["dedup_map"]
         is_duplicate = dedup_key in dedup_map
         if not is_duplicate:
-            dedup_map[dedup_key] = int(time.time() * 1000)
+            dedup_map[dedup_key] = now_ms
             dedup_order.append(dedup_key)
-            while len(dedup_order) > 500:
+            while len(dedup_order) > MAX_DEDUP_ENTRIES:
                 oldest = dedup_order.pop(0)
                 dedup_map.pop(oldest, None)
         return is_duplicate
@@ -847,6 +1021,7 @@ def apply_dedup_guard(result: dict[str, Any]) -> bool:
 def apply_cooldown_guard(result: dict[str, Any]) -> bool:
     cooldown_seconds = to_int(result.get("cooldown_seconds"), default_value=15, min_value=0)
     result["cooldown_seconds"] = cooldown_seconds
+    result["remaining_seconds"] = 0
 
     if result.get("dry_run") is True:
         result["cooldown_skipped"] = True
@@ -907,6 +1082,27 @@ def notify_handoff(result: dict[str, Any]) -> None:
         result["handoff_notify_error"] = redact_sensitive(str(exc))
 
 
+def mark_handoff(
+    result: dict[str, Any],
+    *,
+    reason: str,
+    route_reason: str,
+    handoff_reason: str,
+    error: str = "",
+    notify: bool = True,
+) -> None:
+    result["handoff"] = True
+    result["should_send"] = False
+    result["send"] = False
+    result["reason"] = reason
+    result["route_reason"] = route_reason
+    result["handoff_reason"] = handoff_reason
+    if error:
+        result["error"] = error
+    if notify:
+        notify_handoff(result)
+
+
 def run_handoff_gate(result: dict[str, Any]) -> bool:
     message = to_optional_string(result.get("send_message"))
     lowered = message.lower()
@@ -914,14 +1110,29 @@ def run_handoff_gate(result: dict[str, Any]) -> bool:
     if not hit:
         return False
 
-    result["handoff"] = True
-    result["handoff_reason"] = f"hit_handoff_keyword:{hit}"
-    result["reason"] = "handoff_gate"
-    result["route_reason"] = "handoff_gate"
-    result["should_send"] = False
-    result["send"] = False
-    notify_handoff(result)
+    mark_handoff(
+        result,
+        reason="handoff_gate",
+        route_reason="handoff_gate",
+        handoff_reason=f"hit_handoff_keyword:{hit}",
+    )
     return True
+
+
+def compact_item_context_item(raw_item: Any) -> dict[str, str] | None:
+    if not isinstance(raw_item, dict):
+        return None
+    item_id = to_optional_string(raw_item.get("item_id"))
+    title = to_optional_string(raw_item.get("title"))
+    if not item_id and not title:
+        return None
+    return {
+        "item_id": item_id,
+        "title": title[:120],
+        "price": to_optional_string(raw_item.get("price"))[:40],
+        "status": to_optional_string(raw_item.get("status"))[:20],
+        "status_label": to_optional_string(raw_item.get("status_label"))[:20],
+    }
 
 
 def attach_item_context(result: dict[str, Any]) -> None:
@@ -940,58 +1151,116 @@ def attach_item_context(result: dict[str, Any]) -> None:
         reason = to_optional_string(snapshot.get("reason"))
         result["item_context_status"] = "missing" if reason else "error"
         result["item_context_reason"] = reason or to_optional_string(snapshot.get("message")) or "snapshot_unavailable"
+        result["item_context"] = {
+            "available": False,
+            "source": "items_snapshot",
+            "item_count": 0,
+            "items": [],
+        }
+        return
+
+    snapshot_items_raw = snapshot.get("items") if isinstance(snapshot.get("items"), list) else []
+    compact_items: list[dict[str, str]] = []
+    for raw_item in snapshot_items_raw:
+        compact_item = compact_item_context_item(raw_item)
+        if compact_item is not None:
+            compact_items.append(compact_item)
+
+    requested_item_id = to_optional_string(result.get("item_id"))
+    selected_items: list[dict[str, str]] = []
+    if requested_item_id:
+        selected_items = [item for item in compact_items if item.get("item_id") == requested_item_id][:1]
+        if selected_items:
+            result["item_context_status"] = "available"
+            result["item_context_reason"] = "item_id_matched"
+        else:
+            result["item_context_status"] = "missing"
+            result["item_context_reason"] = "item_id_not_found"
+    else:
+        selling_items = [
+            item
+            for item in compact_items
+            if item.get("status") == "selling" or item.get("status_label") == "在售"
+        ]
+        base_items = selling_items if selling_items else compact_items
+        selected_items = base_items[:3]
+        if selected_items and len(base_items) > 3:
+            result["item_context_status"] = "limited"
+            result["item_context_reason"] = "top_selling_limited_3"
+        elif selected_items:
+            result["item_context_status"] = "available"
+            result["item_context_reason"] = "top_selling"
+        else:
+            result["item_context_status"] = "missing"
+            result["item_context_reason"] = "no_items_available"
 
     result["item_context"] = {
-        "available": snapshot.get("ok") is True,
+        "available": len(selected_items) > 0,
         "source": "items_snapshot",
-        "item_count": to_int(snapshot.get("item_count"), default_value=0, min_value=0),
-        "items": snapshot.get("items") if isinstance(snapshot.get("items"), list) else [],
-        "section_counts": snapshot.get("section_counts") if isinstance(snapshot.get("section_counts"), dict) else {},
-        "metadata": snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {},
+        "item_count": len(selected_items),
+        "items": selected_items,
     }
 
 
 def build_customer_service_policy() -> dict[str, Any]:
     return {
-        "mode": "handoff_gate",
-        "default_action": "allow_openclaw_autoreply",
-        "handoff_only": True,
-        "handoff_triggers": [
-            "refund_or_after_sale",
-            "complaint_or_report",
-            "counterfeit_or_legal_risk",
-            "abuse_or_threat",
-            "off_platform_or_external_contact",
-            "address_or_order_or_payment_or_shipping_dispute",
-            "promise_requires_manual_confirmation",
+        "mode": "openclaw_master_control",
+        "default_action": "openclaw_decides_reply_strategy",
+        "handoff_keywords_enabled": True,
+        "max_reply_chars_must_respect": True,
+        "send_via_bridge_only": True,
+    }
+
+
+def build_bridge_guardrails() -> dict[str, Any]:
+    return {
+        "bridge_role": "security_gateway_only",
+        "must_fail_closed_when": [
+            "handoff_true",
+            "should_send_false",
+            "empty_reply",
+            "invalid_json",
+            "html_or_error_page",
+            "abnormal_or_reasoning_leak",
+            "external_contact_detected",
+            "openclaw_request_failed",
         ],
-        "send_guardrails": {
-            "must_block_when": ["handoff_true", "should_send_false", "empty_reply", "system_exception"],
-            "send_via_bridge_only": True,
-        },
+        "final_send_endpoint": "/send",
+    }
+
+
+def build_conversation_state(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "dry_run": result.get("dry_run") is True,
+        "autoreply_enabled": result.get("autoreply_enabled") is True,
+        "auto_send_enabled": result.get("auto_send_enabled") is True,
+        "dedup_key": to_optional_string(result.get("dedup_key")),
+        "cooldown_seconds": to_int(result.get("cooldown_seconds"), default_value=0, min_value=0),
+        "remaining_seconds": to_int(result.get("remaining_seconds"), default_value=0, min_value=0),
     }
 
 
 def build_openai_chat_request(result: dict[str, Any]) -> dict[str, Any]:
     system_prompt = (
-        "你是闲鱼客服助手。必须只输出JSON对象，字段只允许 reply、should_send、handoff、reason。"
-        "禁止输出思考过程、Markdown、<think>。"
-        "若需要人工介入、涉及风险或不确定承诺，必须 handoff=true 且 should_send=false。"
+        "你是OpenClaw客服Agent。只允许输出JSON对象，且必须包含 reply、should_send、handoff、reason、risk。"
+        "禁止输出思考过程、Markdown、<think>、HTML。"
     )
     user_payload = {
         "cid": result.get("cid", ""),
         "send_user_id": result.get("send_user_id", ""),
+        "message_id": result.get("message_id", ""),
+        "content_type": result.get("content_type", ""),
         "buyer_message": result.get("send_message", ""),
+        "image_payload": result.get("image_payload", {}),
         "item_context": result.get("item_context"),
-        "item_context_status": result.get("item_context_status", ""),
-        "item_context_reason": result.get("item_context_reason", ""),
+        "conversation_state": build_conversation_state(result),
         "customer_service_policy": build_customer_service_policy(),
+        "bridge_guardrails": build_bridge_guardrails(),
+        "dry_run": result.get("dry_run") is True,
         "max_reply_chars": result.get("max_reply_chars", 80),
-        "route_reason": result.get("route_reason", "default_openclaw"),
-        "handoff": result.get("handoff", False),
-        "handoff_reason": result.get("handoff_reason", ""),
     }
     return {
+        # model is only an OpenAI-compatible routing field exposed by OpenClaw Gateway.
         "model": result.get("openai_model") or "openclaw/default",
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -1079,6 +1348,13 @@ def collect_objects(raw_response: Any) -> list[dict[str, Any]]:
     return objects
 
 
+def pick_risk(value: Any) -> str:
+    lowered = to_optional_string(value).lower()
+    if lowered in {"low", "medium", "high"}:
+        return lowered
+    return "medium"
+
+
 def sanitize_reply_text(text: str, max_chars: int) -> str:
     if not text:
         return ""
@@ -1095,143 +1371,155 @@ def sanitize_reply_text(text: str, max_chars: int) -> str:
 
 
 def normalize_openai_response(result: dict[str, Any], response_body: Any) -> None:
-    raw = parse_json_object(response_body) or {"raw": response_body}
-    objects = collect_objects(raw)
-
-    reply = ""
-    reply_source = "none"
-    for obj in objects:
-        candidates = [
-            ("reply", obj.get("reply")),
-            ("text", obj.get("text")),
-            ("message", obj.get("message")),
-            ("content", obj.get("content")),
-            ("final_reply", obj.get("final_reply")),
-            ("answer", obj.get("answer")),
-            ("choices[0].message.content", ((obj.get("choices") or [{}])[0].get("message") or {}).get("content")),
-            ("choices[0].text", (obj.get("choices") or [{}])[0].get("text")),
-        ]
-        for source, value in candidates:
-            text = pick_text(value)
-            if text:
-                reply = text
-                reply_source = source
-                break
-        if reply:
-            break
-
-    content_object = parse_json_object(reply) if reply_source == "choices[0].message.content" else None
-    if content_object is not None:
-        objects.insert(0, content_object)
-        content_reply = pick_text(content_object.get("reply"))
-        if content_reply:
-            reply = content_reply
-            reply_source = "choices[0].message.content.reply"
-        else:
-            reply = ""
-            reply_source = "choices[0].message.content.object"
-
-    handoff: bool | None = None
-    should_send: bool | None = None
-    reason = ""
-    error = ""
-
-    for obj in objects:
-        if handoff is None:
-            for value in [
-                obj.get("handoff"),
-                obj.get("need_handoff"),
-                obj.get("needs_handoff"),
-                obj.get("needs_human"),
-                obj.get("human_handoff"),
-            ]:
-                parsed = parse_bool(value)
-                if parsed is not None:
-                    handoff = parsed
-                    break
-
-        if should_send is None:
-            for value in [obj.get("should_send"), obj.get("shouldSend"), obj.get("send")]:
-                parsed = parse_bool(value)
-                if parsed is not None:
-                    should_send = parsed
-                    break
-
-        if not reason:
-            for value in [obj.get("reason"), obj.get("handoff_reason"), obj.get("route_reason"), obj.get("block_reason")]:
-                text = pick_text(value)
-                if text:
-                    reason = text
-                    break
-
-        if not error:
-            candidates = [
-                ((obj.get("error") or {}).get("message") if isinstance(obj.get("error"), dict) else obj.get("error")),
-                obj.get("err"),
-                obj.get("exception"),
-                obj.get("message"),
-            ]
-            for value in candidates:
-                text = pick_text(value)
-                if not text:
-                    continue
-                lowered = text.lower()
-                if any(
-                    key in lowered
-                    for key in ["status code", "unauthorized", "forbidden", "timeout", "error", "exception"]
-                ):
-                    error = text
-                    break
-
-    if handoff is None:
-        handoff = False
-    if should_send is None:
-        should_send = not handoff
-
-    maybe_html = reply.strip().lower()
-    if not error and (maybe_html.startswith("<!doctype html") or maybe_html.startswith("<html")):
-        error = "openai_html_response"
-
-    result["openai_response"] = raw
-    result["reply_source"] = reply_source
-    result["should_send"] = should_send
-    result["handoff"] = handoff
-    if reason:
-        result["openai_reason"] = reason
-
-    max_chars = to_int(result.get("max_reply_chars"), default_value=80, min_value=1)
-    final_reply = sanitize_reply_text(reply, max_chars)
-
-    if handoff:
-        result["handoff_reason"] = reason or result.get("handoff_reason") or "openai_handoff"
-
-    if error:
-        result["error"] = error
-        result["should_send"] = False
+    raw_response_text = pick_text(response_body)
+    lowered_response = raw_response_text.lower()
+    if lowered_response.startswith("<!doctype html") or lowered_response.startswith("<html"):
+        result["openai_response"] = {"raw": response_body}
+        result["reply_source"] = "none"
+        result["openclaw_output"] = None
+        result["error"] = "openclaw_html_response"
         result["handoff"] = True
-        if not result.get("handoff_reason"):
-            result["handoff_reason"] = f"openai_error:{error}"[:160]
+        result["should_send"] = False
+        result["handoff_reason"] = "openclaw_html_response"
         result["final_reply"] = ""
         return
 
-    if final_reply:
-        has_external_contact, keyword = detect_external_contact(final_reply)
-        if has_external_contact:
-            result["error"] = f"external_contact_in_reply:{keyword}"
-            result["handoff"] = True
-            result["should_send"] = False
-            result["handoff_reason"] = result.get("handoff_reason") or "external_contact_in_reply"
-            result["final_reply"] = ""
-            return
+    raw = parse_json_object(response_body)
+    if raw is None:
+        result["openai_response"] = {"raw": response_body}
+        result["reply_source"] = "none"
+        result["openclaw_output"] = None
+        result["error"] = "openclaw_response_not_json"
+        result["handoff"] = True
+        result["should_send"] = False
+        result["handoff_reason"] = "openclaw_non_json_response"
+        result["final_reply"] = ""
+        return
+    result["openai_response"] = raw
+    result["reply_source"] = "none"
+    result["openclaw_output"] = None
 
-        abnormal, abnormal_type = detect_abnormal_text(final_reply)
-        if abnormal:
-            result["error"] = f"abnormal_reply:{abnormal_type}"
+    envelope_objects = collect_objects(raw)
+    openai_object: dict[str, Any] | None = None
+    for obj in envelope_objects:
+        choices = obj.get("choices")
+        if isinstance(choices, list) and choices:
+            openai_object = obj
+            break
+
+    if openai_object is None:
+        result["error"] = "openclaw_missing_choices"
+        result["handoff"] = True
+        result["should_send"] = False
+        result["handoff_reason"] = "openclaw_missing_choices"
+        result["final_reply"] = ""
+        return
+
+    first_choice = (openai_object.get("choices") or [{}])[0]
+    if not isinstance(first_choice, dict):
+        result["error"] = "openclaw_invalid_choice"
+        result["handoff"] = True
+        result["should_send"] = False
+        result["handoff_reason"] = "openclaw_invalid_choice"
+        result["final_reply"] = ""
+        return
+
+    message_obj = first_choice.get("message")
+    content_value: Any = None
+    if isinstance(message_obj, dict):
+        content_value = message_obj.get("content")
+
+    content_object = parse_json_object(content_value) if isinstance(content_value, dict) else None
+    content_raw = pick_text(content_value)
+    if content_object is None and content_raw:
+        lowered = content_raw.strip().lower()
+        if lowered.startswith("<!doctype html") or lowered.startswith("<html"):
+            result["error"] = "openclaw_html_response"
             result["handoff"] = True
             result["should_send"] = False
-            result["handoff_reason"] = result.get("handoff_reason") or "abnormal_reply"
+            result["handoff_reason"] = "openclaw_html_response"
             result["final_reply"] = ""
             return
+        content_object = parse_json_object(content_raw)
+
+    if content_object is None:
+        error_code = "openclaw_missing_content" if not content_raw else "openclaw_content_non_json"
+        result["error"] = "openclaw_content_non_json"
+        if error_code == "openclaw_missing_content":
+            result["error"] = error_code
+        result["handoff"] = True
+        result["should_send"] = False
+        result["handoff_reason"] = "openclaw_missing_content" if error_code == "openclaw_missing_content" else "openclaw_non_json_response"
+        result["final_reply"] = ""
+        return
+
+    result["reply_source"] = "choices[0].message.content"
+    result["openclaw_output"] = content_object
+
+    should_send = parse_bool(content_object.get("should_send"))
+    if should_send is None:
+        should_send = parse_bool(content_object.get("shouldSend"))
+    if should_send is None:
+        should_send = parse_bool(content_object.get("send"))
+
+    handoff = parse_bool(content_object.get("handoff"))
+    if handoff is None:
+        handoff = parse_bool(content_object.get("need_handoff"))
+    if handoff is None:
+        handoff = parse_bool(content_object.get("needs_handoff"))
+    if handoff is None:
+        handoff = False
+
+    if should_send is None:
+        should_send = not handoff
+
+    reason = pick_text(content_object.get("reason")) or pick_text(content_object.get("handoff_reason"))
+    risk = pick_risk(content_object.get("risk"))
+
+    result["handoff"] = handoff
+    result["should_send"] = should_send
+    result["risk"] = risk
+    if reason:
+        result["openai_reason"] = reason
+    if handoff and reason:
+        result["handoff_reason"] = reason
+
+    max_chars = to_int(result.get("max_reply_chars"), default_value=80, min_value=1)
+    raw_reply = pick_text(content_object.get("reply"))
+    if not raw_reply:
+        result["error"] = "openclaw_empty_reply"
+        result["handoff"] = True
+        result["should_send"] = False
+        result["handoff_reason"] = result.get("handoff_reason") or "openclaw_empty_reply"
+        result["final_reply"] = ""
+        return
+
+    has_external_contact, keyword = detect_external_contact(raw_reply)
+    if has_external_contact:
+        result["error"] = f"external_contact_in_reply:{keyword}"
+        result["handoff"] = True
+        result["should_send"] = False
+        result["handoff_reason"] = result.get("handoff_reason") or "external_contact_in_reply"
+        result["final_reply"] = ""
+        return
+
+    abnormal, abnormal_type = detect_abnormal_text(raw_reply)
+    if abnormal:
+        result["error"] = f"abnormal_reply:{abnormal_type}"
+        result["handoff"] = True
+        result["should_send"] = False
+        result["handoff_reason"] = result.get("handoff_reason") or "abnormal_reply"
+        result["final_reply"] = ""
+        return
+
+    final_reply = sanitize_reply_text(raw_reply, max_chars)
+    if not final_reply:
+        result["error"] = "openclaw_empty_reply"
+        result["handoff"] = True
+        result["should_send"] = False
+        result["handoff_reason"] = result.get("handoff_reason") or "openclaw_empty_reply"
+        result["final_reply"] = ""
+        return
 
     result["final_reply"] = final_reply
 
@@ -1244,10 +1532,16 @@ def call_openai_runtime(result: dict[str, Any]) -> None:
     if not url:
         result["error"] = "missing_openai_runtime_url"
         result["openai_response"] = {"error": "missing_openai_runtime_url"}
+        result["handoff"] = True
+        result["should_send"] = False
+        result["handoff_reason"] = "openclaw_request_failed"
         return
     if not token:
         result["error"] = "missing_openai_gateway_token"
         result["openai_response"] = {"error": "missing_openai_gateway_token"}
+        result["handoff"] = True
+        result["should_send"] = False
+        result["handoff_reason"] = "openclaw_request_failed"
         return
 
     payload = build_openai_chat_request(result)
@@ -1268,22 +1562,54 @@ def call_openai_runtime(result: dict[str, Any]) -> None:
         result["error"] = f"openai_request_failed:{status_part}:{error}"[:220]
         result["handoff"] = True
         result["should_send"] = False
-        result["handoff_reason"] = result.get("handoff_reason") or "openai_request_failed"
+        result["handoff_reason"] = result.get("handoff_reason") or "openclaw_request_failed"
         return
 
     normalize_openai_response(result, response.get("body"))
+
+
+def is_text_content_type(content_type: Any) -> bool:
+    if isinstance(content_type, (int, float)):
+        return int(content_type) == 1
+    lowered = to_optional_string(content_type).lower()
+    return lowered in {"1", "text", "plain_text", "message"}
 
 
 def run_autoreply_decide(raw_payload: dict[str, Any] | None) -> dict[str, Any]:
     normalized = normalize_decide_input(raw_payload)
     state = load_autoreply_state()
     result = create_decide_result_base(normalized, state)
+    text_message = to_optional_string(result.get("send_message"))
+    image_attached = has_image_payload(result.get("image_payload"))
 
-    if not result["cid"] or not result["send_user_id"] or not result["send_message"]:
-        result["reason"] = "invalid_request"
-        result["route_reason"] = "invalid_request"
-        result["should_send"] = False
-        result["error"] = "cid/send_user_id/send_message are required"
+    if not result["cid"] or not result["send_user_id"]:
+        mark_handoff(
+            result,
+            reason="invalid_request",
+            route_reason="invalid_request",
+            handoff_reason="invalid_request",
+            error="cid/send_user_id are required",
+        )
+        return result
+
+    if is_text_content_type(result.get("content_type")) and not text_message:
+        mark_handoff(
+            result,
+            reason="invalid_request",
+            route_reason="invalid_request",
+            handoff_reason="invalid_request",
+            error="send_message is required for text message",
+        )
+        return result
+
+    if not text_message and not image_attached:
+        mark_handoff(
+            result,
+            reason="invalid_request",
+            route_reason="invalid_request",
+            handoff_reason="invalid_request",
+            error="send_message or image payload is required",
+        )
         return result
 
     if state.get("enabled") is not True:
@@ -1311,32 +1637,57 @@ def run_autoreply_decide(raw_payload: dict[str, Any] | None) -> dict[str, Any]:
     call_openai_runtime(result)
 
     if result.get("error"):
-        result["reason"] = "system_exception"
-        result["route_reason"] = "system_exception"
-        result["should_send"] = False
-        result["send"] = False
+        error = to_optional_string(result.get("error"))
+        handoff_reason = "system_exception"
+        if error.startswith("openai_request_failed:") or error in {
+            "missing_openai_runtime_url",
+            "missing_openai_gateway_token",
+        }:
+            handoff_reason = "openclaw_request_failed"
+        elif error == "openclaw_empty_reply":
+            handoff_reason = "openclaw_empty_reply"
+        elif error == "openclaw_html_response":
+            handoff_reason = "openclaw_html_response"
+        elif error in {"openclaw_missing_choices", "openclaw_invalid_choice", "openclaw_missing_content"}:
+            handoff_reason = "openclaw_invalid_response"
+        elif error in {"openclaw_content_non_json", "openclaw_response_not_json"}:
+            handoff_reason = "openclaw_non_json_response"
+        elif error.startswith("external_contact_in_reply:"):
+            handoff_reason = "external_contact_in_reply"
+        elif error.startswith("abnormal_reply:"):
+            handoff_reason = "abnormal_reply"
+
+        mark_handoff(
+            result,
+            reason="system_exception",
+            route_reason="system_exception",
+            handoff_reason=handoff_reason,
+            error=error,
+        )
         return result
 
     if result.get("handoff") is True:
-        result["reason"] = "handoff_gate"
-        result["route_reason"] = "openai_handoff"
-        result["should_send"] = False
-        result["send"] = False
-        if not result.get("handoff_reason"):
-            result["handoff_reason"] = "openai_handoff"
+        mark_handoff(
+            result,
+            reason="handoff_gate",
+            route_reason="openclaw_handoff",
+            handoff_reason=to_optional_string(result.get("handoff_reason")) or "openclaw_handoff",
+        )
         return result
 
     if result.get("should_send") is not True:
         result["reason"] = "should_send_false"
-        result["route_reason"] = "openai_should_send_false"
+        result["route_reason"] = "openclaw_should_send_false"
         result["send"] = False
         return result
 
     if not to_optional_string(result.get("final_reply")):
-        result["reason"] = "empty_reply"
-        result["route_reason"] = "openai_no_valid_reply"
-        result["should_send"] = False
-        result["send"] = False
+        mark_handoff(
+            result,
+            reason="empty_reply",
+            route_reason="openclaw_empty_reply",
+            handoff_reason="openclaw_empty_reply",
+        )
         return result
 
     if result["dry_run"] is True:
@@ -1371,7 +1722,10 @@ def health() -> dict[str, Any]:
 
 
 @APP.get("/items/snapshot")
-def items_snapshot() -> JSONResponse:
+def items_snapshot(bridge_token: str | None = Header(default=None, alias="X-Bridge-Token")) -> JSONResponse:
+    auth_resp = require_bridge_token(bridge_token)
+    if auth_resp is not None:
+        return auth_resp
     snapshot_path = get_snapshot_path()
     payload = load_items_snapshot(snapshot_path)
     if payload is None:
@@ -1385,7 +1739,11 @@ def items_selling(
     headless: bool = True,
     sections: str | None = None,
     max_scroll_rounds: int = 8,
+    bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> JSONResponse:
+    auth_resp = require_bridge_token(bridge_token)
+    if auth_resp is not None:
+        return auth_resp
     snapshot_path = get_snapshot_path()
 
     if not refresh:
@@ -1408,7 +1766,11 @@ def items_snapshot_refresh(
     headless: bool = True,
     sections: str | None = None,
     max_scroll_rounds: int = 8,
+    bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> JSONResponse:
+    auth_resp = require_bridge_token(bridge_token)
+    if auth_resp is not None:
+        return auth_resp
     snapshot_path = get_snapshot_path()
     payload = refresh_items_snapshot_payload(
         snapshot_path=snapshot_path,
@@ -1579,11 +1941,17 @@ def send(
 
 
 @APP.get("/status")
-def status() -> dict[str, Any]:
-    return {
-        "ok": True,
-        "service": "goofish-bridge",
-        "autoreply": load_autoreply_state(),
-        "runtime": load_runtime_state(),
-        "goofish_auth": summarize_goofish_auth_status(),
-    }
+def status(bridge_token: str | None = Header(default=None, alias="X-Bridge-Token")) -> JSONResponse:
+    auth_resp = require_bridge_token(bridge_token)
+    if auth_resp is not None:
+        return auth_resp
+    return JSONResponse(
+        status_code=200,
+        content={
+            "ok": True,
+            "service": "goofish-bridge",
+            "autoreply": load_autoreply_state(),
+            "runtime": load_runtime_state(),
+            "goofish_auth": summarize_goofish_auth_status(),
+        },
+    )

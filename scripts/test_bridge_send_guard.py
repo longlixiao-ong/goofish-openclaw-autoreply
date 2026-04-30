@@ -108,6 +108,10 @@ def assert_response(resp: Any, *, status: int, reason: str) -> None:
         assert content.get("ok") is False, content
 
 
+def assert_unauthorized(resp: Any) -> None:
+    assert_response(resp, status=401, reason="unauthorized")
+
+
 def main() -> int:
     bridge = import_bridge_module()
 
@@ -140,6 +144,16 @@ def main() -> int:
     bridge.run_goofish_command = fake_run_goofish_command
     bridge.get_max_reply_chars = lambda: 80
 
+    # Protected endpoints should reject missing token.
+    assert_unauthorized(bridge.status(bridge_token=None))
+    assert_unauthorized(bridge.items_snapshot(bridge_token=None))
+    assert_unauthorized(bridge.items_selling(bridge_token=None))
+    assert_unauthorized(bridge.items_snapshot_refresh(bridge_token=None))
+    assert_unauthorized(bridge.autoreply_status(bridge_token=None))
+    assert_unauthorized(bridge.autoreply_start(bridge_token=None))
+    assert_unauthorized(bridge.autoreply_stop(bridge_token=None))
+    assert_unauthorized(bridge.autoreply_decide({}, bridge_token=None))
+
     # Case 0: missing token must be blocked before any send call.
     call_count["n"] = 0
     resp0 = bridge.send(SimpleNamespace(cid="c0", toid="u0", text="在的，喜欢可拍"), bridge_token=None)
@@ -162,6 +176,30 @@ def main() -> int:
     )
     assert_response(resp2, status=400, reason="abnormal_text_blocked")
     assert call_count["n"] == 0, "goofish command should not run when abnormal text blocked"
+
+    # Case 2b: words containing null-like substrings should not be false blocked.
+    state_no_rate = dict(state)
+    state_no_rate["global_send_interval_seconds"] = 0
+    bridge.save_autoreply_state(state_no_rate)
+    bridge.save_runtime_state(dict(bridge.DEFAULT_RUNTIME_STATE))
+    call_count["n"] = 0
+    resp2b = bridge.send(
+        SimpleNamespace(cid="c2b", toid="u2b", text="这个词是nullability，不是错误信息"),
+        bridge_token="test-token",
+    )
+    assert getattr(resp2b, "status_code", None) == 200, resp2b
+    assert call_count["n"] == 1, "valid normal text should reach goofish command"
+
+    call_count["n"] = 0
+    resp2c = bridge.send(
+        SimpleNamespace(cid="c2c", toid="u2c", text="这个返回值是 null，需要人工确认"),
+        bridge_token="test-token",
+    )
+    assert_response(resp2c, status=400, reason="abnormal_text_blocked")
+    assert call_count["n"] == 0, "standalone null token should be blocked"
+
+    # Restore global interval for rate-limit test.
+    bridge.save_autoreply_state(state)
 
     # Case 3: global rate limit in safe_mode; second request should be blocked before goofish command.
     bridge.save_runtime_state(dict(bridge.DEFAULT_RUNTIME_STATE))

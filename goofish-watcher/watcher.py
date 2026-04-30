@@ -8,6 +8,8 @@ import os
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -61,6 +63,42 @@ def get_safe_url_label(url: str) -> str:
     if not parsed.scheme or not parsed.netloc:
         return "<invalid-url>"
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
+def get_failed_events_path() -> Path:
+    raw = (os.environ.get("WATCHER_FAILED_EVENTS_PATH", "logs/failed_events.jsonl") or "").strip()
+    return Path(raw or "logs/failed_events.jsonl")
+
+
+def summarize_event_for_dead_letter(event: dict[str, Any]) -> dict[str, Any]:
+    send_message = str(event.get("send_message", "") or "")
+    message_preview = send_message[:120]
+    return {
+        "event": str(event.get("event", "") or ""),
+        "cid": str(event.get("cid", "") or ""),
+        "send_user_id": str(event.get("send_user_id", "") or ""),
+        "send_user_name": str(event.get("send_user_name", "") or "")[:60],
+        "content_type": event.get("content_type"),
+        "message_id": str(event.get("message_id", "") or ""),
+        "message_preview": redact_sensitive(message_preview),
+    }
+
+
+def append_failed_event(event: dict[str, Any], error: str) -> None:
+    target = get_failed_events_path()
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "cid": str(event.get("cid", "") or ""),
+        "send_user_id": str(event.get("send_user_id", "") or ""),
+        "event": summarize_event_for_dead_letter(event),
+        "error": redact_sensitive(error),
+    }
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error("failed to append dead-letter event: %s", redact_sensitive(str(exc)))
 
 
 def setup_logging() -> None:
@@ -173,12 +211,14 @@ def main() -> int:
                     )
                     LOGGER.info("forwarded message event (cid=%s, toid=%s)", cid, toid)
                 except Exception as exc:  # noqa: BLE001
+                    error_text = redact_sensitive(str(exc))
                     LOGGER.error(
                         "failed to forward message event (cid=%s, toid=%s): %s",
                         cid,
                         toid,
-                        redact_sensitive(str(exc)),
+                        error_text,
                     )
+                    append_failed_event(event, error_text)
         except KeyboardInterrupt:
             LOGGER.info("watcher interrupted, exiting")
             stop_process(proc)

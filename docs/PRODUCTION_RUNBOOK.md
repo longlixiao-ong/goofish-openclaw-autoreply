@@ -1,22 +1,23 @@
 # PRODUCTION RUNBOOK
 
-## 1) 正式运行架构
+## 1) 生产架构（主控边界）
 
 ```text
 goofish-watcher
   -> n8n /webhook/goofish-inbound
   -> goofish-bridge /autoreply/decide
-  -> (send=true) goofish-bridge /send
+  -> (send=true && dry_run=false) goofish-bridge /send
   -> goofish-cli message send
 ```
 
 职责边界：
 
-- n8n：只编排，不承载核心业务判断。
-- goofish-bridge：核心决策与最终安全闸门。
-- OpenAI-compatible runtime（New API/OpenClaw Gateway）：回复决策模型层。
+- OpenClaw：唯一 AI 大脑（模型、Prompt、记忆、视觉、回复策略、议价策略）。
+- goofish-bridge：安全网关（鉴权、状态检查、dedup、cooldown、handoff gate、item_context 精简、OpenClaw 调用与归一化、fail-closed、最终 `/send` 闸门）。
+- n8n：编排层（Webhook 接入、调用 bridge、按 `send/dry_run` 路由）。
+- goofish-cli：闲鱼操作层（watch/send/item/media/auth）。
 
-## 2) .env 配置模板
+## 2) 必填环境变量
 
 参考 `.env.example`，正式至少配置：
 
@@ -24,37 +25,28 @@ goofish-watcher
 - `OPENCLAW_RUNTIME_MODE=openai_chat`
 - `OPENCLAW_CHAT_COMPLETIONS_URL`
 - `OPENCLAW_GATEWAY_TOKEN`
-- `OPENCLAW_MODEL`
+- `OPENCLAW_MODEL`（OpenClaw Gateway 路由名/兼容字段）
 - `OPENCLAW_TIMEOUT_SECONDS`
 - `AUTOREPLY_STATE_FILE`
 - `AUTOREPLY_RUNTIME_STATE_FILE`
 - `ITEMS_SNAPSHOT_PATH`
 
-## 3) New API 3000 配置方式
+重要说明：
 
-若你的 New API/OpenAI-compatible 服务在本机 `3000`：
+- bridge 不直配底层模型供应商。
+- 底层模型由 OpenClaw / New API 后台管理。
 
-```env
-OPENCLAW_RUNTIME_MODE=openai_chat
-OPENCLAW_CHAT_COMPLETIONS_URL=http://host.docker.internal:3000/v1/chat/completions
-OPENCLAW_MODEL=openclaw/default
-OPENCLAW_GATEWAY_TOKEN=replace-with-real-token
-```
+## 3) 接口鉴权
 
-## 4) BRIDGE_AUTH_TOKEN 配置
-
-设置后必须通过 header 鉴权：
+配置 `BRIDGE_AUTH_TOKEN` 后，除 `/health` 外，所有 bridge 接口都必须带：
 
 ```text
 X-Bridge-Token: <BRIDGE_AUTH_TOKEN>
 ```
 
-至少受保护：
+`/health` 无鉴权，且只返回最小存活信息，不泄露敏感状态。
 
-- `/autoreply/decide`
-- `/send`
-
-## 5) 启动命令
+## 4) 启动
 
 ```bash
 cp .env.example .env
@@ -62,82 +54,97 @@ cp .env.example .env
 docker compose -f docker-compose.example.yml up -d n8n goofish-bridge goofish-watcher openclaw
 ```
 
-## 6) 导入 n8n workflow
+## 5) 导入 n8n workflow
 
 导入：
 
 - `n8n/workflows/goofish-inbound.example.json`
 
-确认链路为：
+必须确认链路为：
 
-- `Webhook -> /autoreply/decide -> IF 应发送 -> /send`
+- `Webhook -> /autoreply/decide -> IF 应发送 -> (/send 或 不发送结束)`
 
-## 7) dry-run 验证
+且 IF 条件必须满足：
 
-推荐先跑：
+- `send=true && dry_run=false` 才允许走 `/send`
+- `dry_run=true` 永远走“不发送结束”
+
+## 6) dry-run 验证（先做）
 
 ```bash
 python scripts/production_preflight.py
 ```
 
-重点看：
+`decide_dry_run_presale` 必须同时满足：
 
-- `decide_dry_run_presale`：`send=false`
-- `decide_dry_run_handoff`：`handoff=true` 且 `send=false`
-- `dry_run_never_send`：dry-run 永不触发 `/send`
+- HTTP 200
+- `dry_run=true`
+- `send=false`
+- `reason=="dry_run"`
+- `final_reply` 非空
+- `reply_source!="none"`
+- `openai_http_status==200`
+- 不调用 `/send`
 
-## 8) 正式开启自动回复
+`decide_dry_run_handoff` 必须同时满足：
 
-先确认 dry-run 稳定后：
+- HTTP 200
+- `handoff=true`
+- `send=false`
+- `reason/route_reason/handoff_reason` 能说明 handoff
+- 不调用 `/send`
 
-1. `POST /autoreply/start`
-2. 将入站请求 `dry_run=false`
-3. 继续观察 `/autoreply/decide` 返回与 `/send` 拦截日志
+## 7) 开启/停止自动客服
 
-## 9) 停止自动回复
+开启：
 
-```text
-POST /autoreply/stop
+```bash
+curl -X POST http://127.0.0.1:8787/autoreply/start \
+  -H "X-Bridge-Token: ${BRIDGE_AUTH_TOKEN}"
 ```
 
-## 10) 转人工通知配置
+状态：
 
-配置：
+```bash
+curl http://127.0.0.1:8787/autoreply/status \
+  -H "X-Bridge-Token: ${BRIDGE_AUTH_TOKEN}"
+```
+
+停止：
+
+```bash
+curl -X POST http://127.0.0.1:8787/autoreply/stop \
+  -H "X-Bridge-Token: ${BRIDGE_AUTH_TOKEN}"
+```
+
+## 8) fail-closed 与 handoff 通知
+
+以下场景必须 fail-closed（不发送）并转人工：
+
+- 关键词命中转人工
+- OpenClaw 返回 `handoff=true`
+- OpenClaw 请求失败
+- OpenClaw 空回复
+- OpenClaw 异常文本
+- OpenClaw 回复含外联词
+- `invalid_request`
+- `system_exception`
+
+通知配置：
 
 ```env
 HANDOFF_NOTIFY_WEBHOOK_URL=https://your-webhook.example/path
 ```
 
-命中转人工关键词后，bridge 会发送通知；通知失败不会触发自动发送，且会记录 `handoff_notify_error`。
+规则：
 
-## 11) 故障排查
+- 未配置 webhook 时不报错。
+- 通知失败仅记录 `handoff_notify_error`，绝不因此放行发送。
 
-优先检查：
+## 9) 运营合规边界（必须遵守）
 
-1. `GET /health`
-2. `GET /autoreply/status`
-3. `/autoreply/decide` 返回中的：
-   - `reason`
-   - `error`
-   - `openai_http_status`
-   - `openai_response`
-4. `AUTOREPLY_STATE_FILE` 与 `AUTOREPLY_RUNTIME_STATE_FILE` 是否可写
-5. `OPENCLAW_CHAT_COMPLETIONS_URL`、token、模型名是否有效
-
-## 12) 回滚到 mock-openclaw
-
-1. 保持 `OPENCLAW_RUNTIME_MODE=openai_chat`
-2. 改为本地 mock endpoint：
-
-```env
-OPENCLAW_CHAT_COMPLETIONS_URL=http://openclaw:18789/v1/chat/completions
-```
-
-3. 重新执行 dry-run 验证，确认闭环正常后再继续。
-
-## 13) 风险边界（必须遵守）
-
-- 不绕开平台机制，不绕控。
-- 不发送外部联系方式。
-- 转人工问题不自动回复。
-- 真实发送必须经过 `/send` 安全闸门。
+- 不绕过平台风控。
+- 不伪造设备。
+- 不自动处理滑块。
+- 不引导站外交易。
+- 不提交 Cookie/Token/API Key/.env 到仓库。

@@ -105,6 +105,19 @@ def evaluate() -> tuple[bool, dict[str, Any]]:
         }
     )
 
+    runtime_mode = pick_text(os.environ.get("OPENCLAW_RUNTIME_MODE", "openai_chat")).lower()
+    runtime_mode_ok = runtime_mode == "openai_chat"
+    if not runtime_mode_ok:
+        ok = False
+    report["checks"].append(
+        {
+            "name": "runtime_mode_openai_chat_only",
+            "ok": runtime_mode_ok,
+            "value": runtime_mode,
+            "expected": "openai_chat",
+        }
+    )
+
     bridge_base = pick_text(os.environ.get("BRIDGE_BASE_URL", "http://127.0.0.1:8787")) or "http://127.0.0.1:8787"
     token = pick_text(os.environ.get("BRIDGE_AUTH_TOKEN", ""))
     auth_headers = {"X-Bridge-Token": token} if token else {}
@@ -122,9 +135,11 @@ def evaluate() -> tuple[bool, dict[str, Any]]:
         ok = False
     report["checks"].append({"name": "autoreply_status", "ok": status_ok, "detail": status})
 
+    nonce = str(int(time.time() * 1000))
+
     decide_presale_payload = {
-        "cid": "preflight-cid-presale",
-        "send_user_id": "preflight-user-presale",
+        "cid": f"preflight-cid-presale-{nonce}",
+        "send_user_id": f"preflight-user-presale-{nonce}",
         "send_message": "这个还在吗？今天能发吗？",
         "dry_run": True,
     }
@@ -136,19 +151,31 @@ def evaluate() -> tuple[bool, dict[str, Any]]:
         timeout=20.0,
     )
     decide_presale_body = decide_presale.get("body") if isinstance(decide_presale.get("body"), dict) else {}
-    decide_presale_ok = (
-        decide_presale["status"] == 200
-        and isinstance(decide_presale_body, dict)
-        and decide_presale_body.get("send") is False
-        and decide_presale_body.get("dry_run") is True
-    )
+    presale_conditions = {
+        "http_200": decide_presale["status"] == 200,
+        "dry_run_true": decide_presale_body.get("dry_run") is True,
+        "send_false": decide_presale_body.get("send") is False,
+        "reason_dry_run": decide_presale_body.get("reason") == "dry_run",
+        "final_reply_non_empty": bool(pick_text(decide_presale_body.get("final_reply"))),
+        "reply_source_not_none": pick_text(decide_presale_body.get("reply_source")).lower() != "none",
+        "openai_http_status_200": decide_presale_body.get("openai_http_status") == 200,
+        "send_not_called": decide_presale_body.get("send") is False,
+    }
+    decide_presale_ok = all(presale_conditions.values())
     if not decide_presale_ok:
         ok = False
-    report["checks"].append({"name": "decide_dry_run_presale", "ok": decide_presale_ok, "detail": decide_presale})
+    report["checks"].append(
+        {
+            "name": "decide_dry_run_presale",
+            "ok": decide_presale_ok,
+            "conditions": presale_conditions,
+            "detail": decide_presale,
+        }
+    )
 
     decide_handoff_payload = {
-        "cid": "preflight-cid-handoff",
-        "send_user_id": "preflight-user-handoff",
+        "cid": f"preflight-cid-handoff-{nonce}",
+        "send_user_id": f"preflight-user-handoff-{nonce}",
         "send_message": "我要退款，走微信聊",
         "dry_run": True,
     }
@@ -160,40 +187,34 @@ def evaluate() -> tuple[bool, dict[str, Any]]:
         timeout=20.0,
     )
     decide_handoff_body = decide_handoff.get("body") if isinstance(decide_handoff.get("body"), dict) else {}
-    decide_handoff_ok = (
-        decide_handoff["status"] == 200
-        and isinstance(decide_handoff_body, dict)
-        and decide_handoff_body.get("send") is False
-        and decide_handoff_body.get("handoff") is True
-    )
+    handoff_reason_text = " ".join(
+        [
+            pick_text(decide_handoff_body.get("reason")),
+            pick_text(decide_handoff_body.get("route_reason")),
+            pick_text(decide_handoff_body.get("handoff_reason")),
+        ]
+    ).lower()
+    handoff_conditions = {
+        "http_200": decide_handoff["status"] == 200,
+        "handoff_true": decide_handoff_body.get("handoff") is True,
+        "send_false": decide_handoff_body.get("send") is False,
+        "reason_mentions_handoff": "handoff" in handoff_reason_text or "manual" in handoff_reason_text,
+        "send_not_called": decide_handoff_body.get("send") is False,
+    }
+    decide_handoff_ok = all(handoff_conditions.values())
     if not decide_handoff_ok:
-        ok = False
-    report["checks"].append({"name": "decide_dry_run_handoff", "ok": decide_handoff_ok, "detail": decide_handoff})
-
-    send_without_token = http_call(
-        "POST",
-        f"{bridge_base}/send",
-        payload={"cid": "preflight-cid", "toid": "preflight-user", "text": "在的"},
-    )
-    if token:
-        unauthorized_ok = send_without_token["status"] == 401
-    else:
-        unauthorized_ok = True
-    if not unauthorized_ok:
         ok = False
     report["checks"].append(
         {
-            "name": "send_without_token",
-            "ok": unauthorized_ok,
-            "detail": send_without_token,
-            "note": "expects 401 only when BRIDGE_AUTH_TOKEN is configured",
+            "name": "decide_dry_run_handoff",
+            "ok": decide_handoff_ok,
+            "conditions": handoff_conditions,
+            "detail": decide_handoff,
         }
     )
 
-    # No authorized /send invocation here: dry-run path must never call /send.
-    dry_run_no_send_ok = (
-        decide_presale_body.get("send") is False and decide_presale_body.get("dry_run") is True
-    )
+    # This script intentionally never calls /send.
+    dry_run_no_send_ok = decide_presale_body.get("send") is False and decide_presale_body.get("dry_run") is True
     if not dry_run_no_send_ok:
         ok = False
     report["checks"].append(
@@ -205,6 +226,7 @@ def evaluate() -> tuple[bool, dict[str, Any]]:
                 "dry_run": decide_presale_body.get("dry_run"),
                 "reason": decide_presale_body.get("reason"),
             },
+            "note": "production_preflight never calls /send endpoint",
         }
     )
 

@@ -2,7 +2,7 @@
 
 > 目标：把闲鱼做成一个可长期运行、可控、可停机、可审计的自动客服通道。  
 > `goofish-cli` 负责闲鱼登录、收消息、发消息、查询商品、上传图片、发布商品。  
-> `n8n` 负责编排流程、自动客服开关、去重、冷却、发送队列、风控分流。  
+> `n8n` 仅负责编排层（Webhook 接入、调用 bridge、按 `send/dry_run` 路由）。
 > `OpenClaw` 负责模型、视觉理解、回复策略、记忆、小刀议价规则。
 
 ## 正式运行闭环（当前实现）
@@ -27,6 +27,26 @@ goofish-watcher -> n8n webhook -> goofish-bridge /autoreply/decide
   - fail-closed
 - 真实发送只允许走 `goofish-bridge /send`（最终安全闸门）。
 - `dry_run=true` 永远不发送。
+
+### 当前能力状态（避免夸大）
+
+已实现：
+
+- OpenClaw 作为唯一 AI 大脑；bridge 仅调用 OpenClaw Gateway OpenAI-compatible 接口。
+- `goofish-bridge /autoreply/decide`：入站归一化、状态检查、dedup TTL、cooldown、转人工门控、item_context 精简透传、OpenClaw 结果归一化、fail-closed。
+- `goofish-bridge /send`：最终安全闸门（外联词/异常文本/发送间隔拦截）。
+- 关键接口 `X-Bridge-Token` 鉴权（`/health` 除外）。
+- watcher 转发失败 dead-letter（JSONL）记录。
+
+部分实现：
+
+- 图片消息字段透传到 OpenClaw（本仓库未实现 bridge 侧多模态主动拼装与发送）。
+- 商品快照来自本地抓取/缓存，bridge 仅做最小字段裁剪。
+
+计划实现：
+
+- 图片多模态完整自动回复链路（OpenClaw 视觉结果与回复闭环）。
+- 多轮会话记忆增强、商品发布辅助等扩展能力。
 
 请先阅读：
 
@@ -132,8 +152,9 @@ goofish message send
 Docker Compose
 ├── n8n
 ├── goofish-bridge
-│   ├── watch loop
-│   ├── send queue
+│   ├── security gateway
+│   ├── /autoreply/decide
+│   ├── /send
 │   ├── health check
 │   ├── autoreply on/off
 │   └── HTTP API
@@ -143,11 +164,13 @@ Docker Compose
 稳定版中，n8n 不直接执行 shell 命令，而是通过 HTTP 调用 `goofish-bridge`：
 
 ```text
-POST /send
-POST /autoreply/start
-POST /autoreply/stop
-GET  /health
-GET  /status
+GET  /health                           (no auth)
+GET  /status                           (X-Bridge-Token)
+POST /autoreply/start                  (X-Bridge-Token)
+POST /autoreply/stop                   (X-Bridge-Token)
+GET  /autoreply/status                 (X-Bridge-Token)
+POST /autoreply/decide                 (X-Bridge-Token)
+POST /send                             (X-Bridge-Token)
 ```
 
 ---
@@ -188,16 +211,11 @@ n8n 负责流程编排：
 ```text
 接收 goofish-watcher 推来的消息
 判断自动客服是否开启
-做 message_id / cid 去重
-做同一会话冷却
-做全局发送限流
-按风险等级分流
-调用 OpenClaw
-清洗最终回复
-做外联词扫描
-调用 goofish message send 或 goofish-bridge /send
-失败时熔断
-通知用户人工处理
+调用 goofish-bridge /autoreply/decide
+根据 send 与 dry_run 路由：
+  - send=true 且 dry_run=false -> goofish-bridge /send
+  - 其他情况 -> 不发送结束
+保留可观测性与告警编排（不承载客服策略逻辑）
 ```
 
 ### 4.3 OpenClaw
@@ -697,31 +715,13 @@ OpenClaw 不可用 → 停止自动客服
 ```text
 Webhook: /goofish-inbound
   ↓
-Code: message_id 去重
+HTTP Request: goofish-bridge /autoreply/decide
   ↓
-Code: 自动客服开关检查
+IF: send=true && dry_run=false
+  ├─ 是：HTTP Request: goofish-bridge /send
+  └─ 否：不发送结束
   ↓
-Code: 会话冷却检查
-  ↓
-IF: 是否高风险消息
-  ├─ 是：通知人工，不发送
-  └─ 否：继续
-  ↓
-IF: 是否图片消息
-  ├─ 是：调用视觉模型 / OpenClaw 图片理解
-  └─ 否：跳过
-  ↓
-HTTP Request: 调 OpenClaw Agent
-  ↓
-Code: sanitizeReply
-  ↓
-Code: 外联词扫描
-  ↓
-Queue / Wait: 全局发送限流
-  ↓
-Execute Command 或 HTTP: goofish message send
-  ↓
-记录日志
+记录日志 / 告警
 ```
 
 ### 11.2 工作流 2：自动客服开关
@@ -729,15 +729,15 @@ Execute Command 或 HTTP: goofish message send
 ```text
 Webhook: /goofish-autoreply/start
   ↓
-设置 enabled=true
+HTTP Request: POST /autoreply/start
 
 Webhook: /goofish-autoreply/stop
   ↓
-设置 enabled=false
+HTTP Request: POST /autoreply/stop
 
 Webhook: /goofish-autoreply/status
   ↓
-返回当前状态
+HTTP Request: GET /autoreply/status
 ```
 
 ### 11.3 工作流 3：健康检查
@@ -770,6 +770,8 @@ goofish message watch
 过滤 event=message
   ↓
 POST 到 n8n
+  ↓ (失败)
+写入 dead-letter: logs/failed_events.jsonl（脱敏，不自动重放）
 ```
 
 ### 12.2 伪代码
@@ -811,7 +813,13 @@ while True:
     except Exception as e:
         print(f"watcher error: {e}")
 
-    time.sleep(5)
+time.sleep(5)
+```
+
+dead-letter 安全回放工具（默认 dry-run，仅打印不真实转发）：
+
+```powershell
+python scripts/replay_failed_events.py --path logs/failed_events.jsonl --tail
 ```
 
 ---
@@ -1054,7 +1062,7 @@ docker compose logs -f goofish-watcher
 2. 准备 `data/autoreply-state.json`（可从 `data/autoreply-state.example.json` 复制）。
 3. 启动 `n8n` 与 `goofish-watcher`。
 4. 在 n8n 导入 `n8n/workflows/goofish-inbound.example.json`。
-5. Compose 容器内默认使用 `OPENCLAW_REPLY_URL=http://openclaw:18789/reply`，`send_text.py` 仅作为本地调试备用。
+5. Compose 容器内默认使用 `OPENCLAW_CHAT_COMPLETIONS_URL=http://openclaw:18789/v1/chat/completions`，`send_text.py` 仅作为本地调试备用。
 6. 保持 `safe_mode` 与限流参数，先用低风险问句做流程验证。
 
 ### 19.4 n8n Webhook 配置
@@ -1063,7 +1071,7 @@ docker compose logs -f goofish-watcher
 - 宿主机访问 n8n：`http://127.0.0.1:5678`（默认仅本机绑定）
 - n8n Webhook 节点：`POST /webhook/goofish-inbound`
 - 入站只处理 `event=message`，其余事件直接忽略。
-- n8n 容器内调用 mock OpenClaw：`http://openclaw:18789/reply`
+- n8n 容器内调用 mock OpenClaw：`http://openclaw:18789/v1/chat/completions`
 
 ### 19.5 OpenClaw 返回 JSON 格式（要求）
 
@@ -1143,21 +1151,24 @@ docker compose logs -f goofish-bridge
 curl http://localhost:8787/health
 
 # status
-curl http://localhost:8787/status
+curl -H "X-Bridge-Token: ${BRIDGE_AUTH_TOKEN}" http://localhost:8787/status
 
 # send
 curl -X POST http://localhost:8787/send \
+  -H "X-Bridge-Token: ${BRIDGE_AUTH_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"cid":"60585751957","toid":"2215266653893","text":"在的，喜欢可拍"}'
 
 # 开启自动客服
-curl -X POST http://localhost:8787/autoreply/start
+curl -X POST http://localhost:8787/autoreply/start \
+  -H "X-Bridge-Token: ${BRIDGE_AUTH_TOKEN}"
 
 # 关闭自动客服
-curl -X POST http://localhost:8787/autoreply/stop
+curl -X POST http://localhost:8787/autoreply/stop \
+  -H "X-Bridge-Token: ${BRIDGE_AUTH_TOKEN}"
 
 # 自动客服状态
-curl http://localhost:8787/autoreply/status
+curl -H "X-Bridge-Token: ${BRIDGE_AUTH_TOKEN}" http://localhost:8787/autoreply/status
 ```
 
 ### 20.3 n8n workflow 约束
@@ -1173,12 +1184,11 @@ curl http://localhost:8787/autoreply/status
   - 无有效 `reply` 不发送
   - 任意系统异常不发送
 - 发送节点必须是 `HTTP Request -> http://goofish-bridge:8787/send`，不得绕过 bridge 闸门
-- OpenClaw runtime 模式通过 `.env` 配置：
-  - `OPENCLAW_RUNTIME_MODE=custom_reply`：请求 `OPENCLAW_REPLY_URL`
-  - `OPENCLAW_RUNTIME_MODE=openai_chat`：请求 `OPENCLAW_CHAT_COMPLETIONS_URL`
-  - `openai_chat` 模式需配置：
-    - `OPENCLAW_GATEWAY_TOKEN`（Authorization Bearer）
-    - `OPENCLAW_MODEL`（默认 `openclaw/default`）
+- OpenClaw runtime 固定为 `OPENCLAW_RUNTIME_MODE=openai_chat`（仅支持 OpenAI-compatible `/v1/chat/completions`）。
+- 必填：
+  - `OPENCLAW_CHAT_COMPLETIONS_URL`
+  - `OPENCLAW_GATEWAY_TOKEN`（Authorization Bearer）
+  - `OPENCLAW_MODEL`（OpenClaw Gateway 路由名/兼容字段，不是 bridge 直连底层模型厂商）
 - `/send` 作为最终安全闸门（bridge fail-closed）：
   - `safe_mode=true` 时会在 bridge 侧再次拦截外联词和异常文本
   - `safe_mode=true` 时会执行 `global_send_interval_seconds` 全局发送间隔
@@ -1211,41 +1221,23 @@ python -m json.tool n8n/workflows/goofish-inbound.example.json
 - `route_reason`
 - `item_context_status`
 - `item_context_reason`
-- `openclaw_response`
+- `openai_http_status`（应为 200）
+- `openai_response`
+- `reply_source`（不应为 `none`）
 - `should_send`
 - `final_reply`
 - `send=false`
 
-### 20.6 OpenClaw 运行时切换（custom_reply / openai_chat）
+### 20.6 OpenClaw 运行时（仅 openai_chat）
 
-默认开发模式（mock，`custom_reply`）：
+bridge 只支持 OpenClaw Gateway OpenAI-compatible 接口：
 
-```powershell
-docker compose up -d n8n goofish-bridge openclaw
-```
+1. `OPENCLAW_RUNTIME_MODE=openai_chat`
+2. `OPENCLAW_CHAT_COMPLETIONS_URL=http://host.docker.internal:18789/v1/chat/completions`
+3. `OPENCLAW_GATEWAY_TOKEN=<真实 token，不提交>`
+4. `OPENCLAW_MODEL=openclaw/default`
 
-官方 OpenClaw Gateway 模式（`openai_chat`）：
-
-1. 修改 `.env`：
-   - `OPENCLAW_RUNTIME_MODE=openai_chat`
-   - `OPENCLAW_CHAT_COMPLETIONS_URL=http://host.docker.internal:18789/v1/chat/completions`
-   - `OPENCLAW_GATEWAY_TOKEN=<真实 token，不提交>`
-   - `OPENCLAW_MODEL=openclaw/default`
-2. 启动时不启动本地 mock `openclaw` 服务
-
-```powershell
-docker compose up -d n8n goofish-bridge
-```
-
-回滚到 mock：
-
-1. `OPENCLAW_RUNTIME_MODE=custom_reply`
-2. `OPENCLAW_REPLY_URL` 改回 `http://openclaw:18789/reply`
-3. 重新启动 `openclaw` mock 服务
-
-```powershell
-docker compose up -d n8n goofish-bridge openclaw
-```
+`OPENCLAW_MODEL` 是 OpenClaw Gateway 暴露的路由/兼容字段，底层模型供应商由 OpenClaw / New API 后台管理，不在 bridge 中配置。
 
 ### 20.7 OpenClaw 协议测试脚本（仅测试，不发送）
 
@@ -1253,18 +1245,15 @@ docker compose up -d n8n goofish-bridge openclaw
 
 用途：
 
-- 支持 `custom_reply` 与 `openai_chat` 两种请求格式
+- 仅验证 OpenClaw Gateway `openai_chat` 请求格式
 - 输出原始响应 + 归一化结果
 - 不调用 `/send`，不发送闲鱼消息
 
 示例：
 
 ```powershell
-# custom_reply（mock）
-python scripts/test_openclaw_reply.py --mode custom_reply --url http://127.0.0.1:18789/reply
-
 # openai_chat（官方 gateway）
-python scripts/test_openclaw_reply.py --mode openai_chat --url http://host.docker.internal:18789/v1/chat/completions --token "<TOKEN>" --model openclaw/default
+python scripts/test_openclaw_reply.py --url http://host.docker.internal:18789/v1/chat/completions --token "<TOKEN>" --model openclaw/default
 
 # 离线校验（不发 HTTP）
 python scripts/test_openclaw_reply.py --self-check
@@ -1335,21 +1324,21 @@ python scripts/refresh_items_snapshot.py --via-container
 直接接口方式：
 
 ```powershell
-curl.exe "http://127.0.0.1:8787/items/selling?refresh=true"
-curl.exe "http://127.0.0.1:8787/items/snapshot"
+curl.exe "http://127.0.0.1:8787/items/selling?refresh=true" -H "X-Bridge-Token: $env:BRIDGE_AUTH_TOKEN"
+curl.exe "http://127.0.0.1:8787/items/snapshot" -H "X-Bridge-Token: $env:BRIDGE_AUTH_TOKEN"
 ```
 
 也可使用显式刷新接口：
 
 ```powershell
-curl.exe -X POST "http://127.0.0.1:8787/items/snapshot/refresh"
+curl.exe -X POST "http://127.0.0.1:8787/items/snapshot/refresh" -H "X-Bridge-Token: $env:BRIDGE_AUTH_TOKEN"
 ```
 
 说明：
 
 - 快照容器路径：`/app/data/items_snapshot.json`
 - 在本仓库默认映射到主机 `./data/items_snapshot.json`
-- n8n inbound workflow 会通过 `GET http://goofish-bridge:8787/items/snapshot` 读取并传递 `item_context` 给 OpenClaw。
+- `goofish-bridge /autoreply/decide` 会从快照文件读取并精简 `item_context` 后再传给 OpenClaw。
 
 常见错误：
 
