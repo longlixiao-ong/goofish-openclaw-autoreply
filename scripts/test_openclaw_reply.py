@@ -65,6 +65,22 @@ def parse_bool(value: Any) -> bool | None:
     return None
 
 
+def redact_headers(headers: dict[str, Any]) -> dict[str, str]:
+    redacted: dict[str, str] = {}
+    sensitive_names = {"x-bridge-token", "cookie", "set-cookie", "x-api-key"}
+    for key, value in headers.items():
+        name = to_optional_string(key)
+        lowered = name.lower()
+        if lowered == "authorization":
+            redacted[name] = "Bearer <redacted>"
+            continue
+        if lowered in sensitive_names:
+            redacted[name] = "<redacted>"
+            continue
+        redacted[name] = to_optional_string(value)
+    return redacted
+
+
 def strip_markdown_json_fence(raw: str) -> str:
     text = raw.strip()
     if not text:
@@ -508,7 +524,7 @@ def main() -> int:
         "url": url,
         "timeout": args.timeout,
         "send_called": False,
-        "request_headers": request_config["headers"],
+        "request_headers": redact_headers(request_config["headers"]),
         "request_payload": request_config["payload"],
         "response_ok": response.get("ok", False),
         "http_status": response.get("http_status"),
